@@ -24,6 +24,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QDockWidget>
 
 #include <vector>
 
@@ -543,12 +544,22 @@ static QWidget *create_gstreamer_dock_widget(void)
 	return widget;
 }
 
+static QDockWidget *g_dock_widget = nullptr;
+
 extern "C" void gstreamer_dock_register(void)
 {
-	obs_frontend_add_dock_by_id("obs-gstreamer-dock", "GStreamer Output", create_gstreamer_dock_widget());
+	if (!g_dock_widget) {
+		g_dock_widget = new QDockWidget("GStreamer Output");
+		g_dock_widget->setObjectName("obs-gstreamer-dock");
+		g_dock_widget->setWidget(create_gstreamer_dock_widget());
+		obs_frontend_add_dock(g_dock_widget);
+	}
 }
 
 extern "C" void gstreamer_dock_unregister(void)
 {
-	obs_frontend_remove_dock("obs-gstreamer-dock");
+	if (g_dock_widget) {
+		delete g_dock_widget;
+		g_dock_widget = nullptr;
+	}
 }
