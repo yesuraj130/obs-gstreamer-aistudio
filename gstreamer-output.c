@@ -145,21 +145,20 @@ static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer user_dat
 {
 	blog(LOG_INFO, "bus_callback = called");
 	data_t *data = user_data;
+	const char *output_name = (data && data->output) ? obs_output_get_name(data->output) : "GStreamer Output";
 
 	switch (GST_MESSAGE_TYPE(message)) {
 		case GST_MESSAGE_ERROR: {
 			GError *err;
 			gst_message_parse_error(message, &err, NULL);
-			const char *source_name = "obs_source_get_name(data->source)";
-			blog(LOG_ERROR, "[obs-gstreamer] %s: %s", source_name, err->message);
+			blog(LOG_ERROR, "[obs-gstreamer] %s: %s", output_name, err->message);
 			g_error_free(err);
 			break;
 		}
 		case GST_MESSAGE_WARNING: {
 			GError *err;
 			gst_message_parse_warning(message, &err, NULL);
-			const char *source_name = "obs_source_get_name(data->source)";
-			blog(LOG_WARNING, "[obs-gstreamer] %s: %s", source_name, err->message);
+			blog(LOG_WARNING, "[obs-gstreamer] %s: %s", output_name, err->message);
 			g_error_free(err);
 		} break;
 		default:
