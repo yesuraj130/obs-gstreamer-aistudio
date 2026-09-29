@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en" class="h-full bg-slate-950 text-slate-100">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,13 +7,355 @@
   <meta name="description" content="OBS Studio GStreamer Plugin with hardware accelerated encoding and WebRTC streaming">
   <meta property="og:title" content="OBS GStreamer Plugin & Stream Viewer">
   <meta property="og:description" content="OBS Studio GStreamer Plugin with hardware accelerated encoding and WebRTC streaming">
+  <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
-  <div id="player-wrap">
-    <video id="video" autoplay playsinline muted></video>
-    <pre id="status">connecting&hellip;</pre>
+<body class="h-full flex flex-col antialiased selection:bg-indigo-500 selection:text-white font-sans overflow-x-hidden">
+  <!-- Top Navigation & Status Bar -->
+  <header class="border-b border-slate-800 bg-slate-900/90 backdrop-blur px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 sticky top-0 z-40">
+    <div class="flex items-center space-x-3">
+      <div class="h-8 w-8 rounded-lg bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+        <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-sm font-semibold tracking-wide text-white flex items-center gap-2">
+          OBS GStreamer Stream Monitor
+          <span id="badge-source-mode" class="px-2 py-0.5 text-[10px] font-medium tracking-wider uppercase rounded-full bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
+            WHEP WebRTC
+          </span>
+        </h1>
+        <p class="text-xs text-slate-400">Low-latency hardware accelerated live preview</p>
+      </div>
+    </div>
+
+    <!-- Source Selector Tabs -->
+    <div class="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
+      <button id="btn-mode-whep" class="px-3 py-1 rounded font-medium transition-colors bg-indigo-600 text-white shadow-sm flex items-center gap-1.5" title="Connect to local OBS GStreamer plugin via WHEP">
+        <span class="w-2 h-2 rounded-full bg-red-400 animate-pulse"></span>
+        OBS Live (WHEP)
+      </button>
+      <button id="btn-mode-test" class="px-3 py-1 rounded font-medium transition-colors text-slate-400 hover:text-slate-200 flex items-center gap-1.5" title="Generate interactive WebRTC test pattern inside preview">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+        </svg>
+        Test Pattern
+      </button>
+      <button id="btn-mode-custom" class="px-3 py-1 rounded font-medium transition-colors text-slate-400 hover:text-slate-200 flex items-center gap-1.5" title="Connect to custom external WHEP URL">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+        </svg>
+        Custom WHEP
+      </button>
+    </div>
+
+    <!-- Quick Status & Help Buttons -->
+    <div class="flex items-center gap-3">
+      <div id="backend-indicator" class="flex items-center gap-2 px-2.5 py-1 rounded-md bg-slate-800/80 border border-slate-700/60 text-xs text-slate-300" title="Checks if GStreamer WebRTC server is listening on port 8888">
+        <span id="backend-dot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+        <span id="backend-text">Checking Port 8888...</span>
+      </div>
+
+      <button id="btn-open-guide" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-md border border-slate-700 flex items-center gap-1.5 transition-colors">
+        <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        OBS Setup
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Viewport Area -->
+  <main class="flex-1 flex flex-col lg:flex-row min-h-0 bg-slate-950 overflow-hidden">
+    <!-- Video Player Stage (Left / Main) -->
+    <section class="flex-1 flex flex-col justify-center items-center bg-black relative p-2 sm:p-4 overflow-hidden">
+      <!-- Player Wrapper -->
+      <div id="player-wrap" class="w-full h-full max-h-[85vh] max-w-6xl aspect-video bg-slate-900 rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center relative group">
+        <!-- Live Video Element -->
+        <video id="video" autoplay playsinline muted class="w-full h-full object-contain bg-black"></video>
+
+        <!-- Hidden canvas used for generating WebRTC test pattern -->
+        <canvas id="test-canvas" width="1280" height="720" class="hidden"></canvas>
+
+        <!-- Top Badges Overlay -->
+        <div class="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none z-10 transition-opacity duration-300">
+          <div class="flex items-center gap-2">
+            <!-- Stream Live Status Badge -->
+            <span id="badge-stream-state" class="px-2.5 py-1 rounded-md text-xs font-semibold uppercase tracking-wider backdrop-blur-md bg-slate-900/80 border border-slate-700 text-slate-300 flex items-center gap-2 shadow-lg">
+              <span id="stream-pulse" class="w-2 h-2 rounded-full bg-slate-400"></span>
+              <span id="stream-text">Standby</span>
+            </span>
+
+            <!-- Resolution & Framerate Badge -->
+            <span id="badge-resolution" class="hidden px-2 py-1 rounded-md text-xs font-mono font-medium backdrop-blur-md bg-slate-900/80 border border-slate-700/80 text-emerald-400 shadow-lg">
+              0x0 @ 0fps
+            </span>
+
+            <!-- Bitrate Badge -->
+            <span id="badge-bitrate" class="hidden px-2 py-1 rounded-md text-xs font-mono font-medium backdrop-blur-md bg-slate-900/80 border border-slate-700/80 text-cyan-400 shadow-lg">
+              0 kbps
+            </span>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <!-- Audio Meter Indicator -->
+            <div id="audio-vu-meter" class="hidden flex items-end gap-0.5 h-4 bg-slate-900/80 backdrop-blur px-1.5 py-0.5 rounded border border-slate-700">
+              <span class="w-1 bg-emerald-400 h-2 rounded-sm transition-all duration-75"></span>
+              <span class="w-1 bg-emerald-400 h-3 rounded-sm transition-all duration-75"></span>
+              <span class="w-1 bg-yellow-400 h-1 rounded-sm transition-all duration-75"></span>
+            </div>
+
+            <!-- Stats Toggle Button -->
+            <button id="btn-toggle-stats" class="pointer-events-auto px-2 py-1 rounded-md text-xs font-medium backdrop-blur-md bg-slate-900/80 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition shadow-lg flex items-center gap-1">
+              <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              Stats
+            </button>
+          </div>
+        </div>
+
+        <!-- Offline / Waiting Stream Card Overlay -->
+        <div id="offline-overlay" class="absolute inset-0 bg-slate-950/85 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-20 transition-opacity">
+          <div class="max-w-md w-full bg-slate-900/90 border border-slate-800 rounded-xl p-6 shadow-2xl space-y-4">
+            <div class="mx-auto w-12 h-12 rounded-full bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+              <svg class="w-6 h-6 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636a9 9 0 010 12.728m0 0l-2.829-2.829m2.829 2.829L21 21M15.536 8.464a5 5 0 010 7.072m0 0l-2.829-2.829m-4.243 2.829a4.978 4.978 0 01-1.414-2.83m-1.414 5.658a9 9 0 01-2.167-9.238m7.824 2.166a1 1 0 111.414 1.414" />
+              </svg>
+            </div>
+
+            <div class="space-y-1">
+              <h2 id="overlay-title" class="text-base font-semibold text-white">OBS WebRTC Stream Offline</h2>
+              <p id="overlay-desc" class="text-xs text-slate-400 leading-relaxed">
+                Waiting for OBS Studio to start streaming via the GStreamer WebRTC output on port 8888.
+              </p>
+            </div>
+
+            <!-- Retry countdown & status pill -->
+            <div class="bg-slate-950/80 rounded-lg p-3 border border-slate-800/80 text-left space-y-1.5 font-mono text-xs">
+              <div class="flex items-center justify-between text-slate-400">
+                <span>WHEP Endpoint:</span>
+                <span class="text-indigo-300 font-semibold" id="lbl-endpoint">/whep</span>
+              </div>
+              <div class="flex items-center justify-between text-slate-400">
+                <span>Backend Port:</span>
+                <span id="lbl-port-status" class="text-amber-400 font-semibold">127.0.0.1:8888 (unreachable)</span>
+              </div>
+              <div class="flex items-center justify-between text-slate-400 pt-1 border-t border-slate-800/80">
+                <span>Next Auto-Retry:</span>
+                <span id="lbl-retry-countdown" class="text-slate-200">in 3s</span>
+              </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="flex items-center gap-2 pt-1">
+              <button id="btn-reconnect-now" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2 px-3 rounded-lg text-xs transition flex items-center justify-center gap-1.5 shadow-md shadow-indigo-600/20">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Retry Connection
+              </button>
+              <button id="btn-switch-test-pattern" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium py-2 px-3 rounded-lg text-xs border border-slate-700 transition flex items-center justify-center gap-1.5">
+                <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Run Test Stream
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Custom WHEP Configuration Drawer (when in Custom mode) -->
+        <div id="custom-whep-bar" class="hidden absolute top-14 left-3 right-3 bg-slate-900/95 border border-slate-700 rounded-lg p-3 z-30 shadow-xl backdrop-blur flex items-center gap-2">
+          <input id="input-custom-url" type="url" placeholder="https://your-server.com/whep/endpoint" class="flex-1 bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono">
+          <button id="btn-connect-custom" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded font-medium transition">
+            Connect
+          </button>
+        </div>
+
+        <!-- Bottom Controls Bar Overlay -->
+        <div class="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/90 via-black/50 to-transparent flex items-center justify-between gap-4 z-10 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+          <div class="flex items-center gap-2">
+            <!-- Play / Pause -->
+            <button id="btn-play-pause" class="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition" title="Play/Pause">
+              <svg id="icon-pause" class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+              </svg>
+              <svg id="icon-play" class="w-4 h-4 hidden" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M8 5v14l11-7z"/>
+              </svg>
+            </button>
+
+            <!-- Mute / Unmute -->
+            <button id="btn-mute" class="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition" title="Mute/Unmute">
+              <svg id="icon-muted" class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
+              </svg>
+              <svg id="icon-unmuted" class="w-4 h-4 hidden" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+              </svg>
+            </button>
+
+            <!-- Volume Slider -->
+            <input id="volume-slider" type="range" min="0" max="1" step="0.05" value="1" class="w-16 sm:w-24 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-indigo-500">
+          </div>
+
+          <div class="flex items-center gap-2">
+            <!-- Snapshot Capture -->
+            <button id="btn-snapshot" class="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition" title="Capture Snapshot frame">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
+
+            <!-- Picture in Picture -->
+            <button id="btn-pip" class="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition" title="Picture in Picture">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+            </button>
+
+            <!-- Fullscreen -->
+            <button id="btn-fullscreen" class="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition" title="Toggle Fullscreen">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Side Diagnostics / Telemetry Panel -->
+    <aside id="side-panel" class="w-full lg:w-80 border-t lg:border-t-0 lg:border-l border-slate-800 bg-slate-900/60 backdrop-blur flex flex-col overflow-y-auto">
+      <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+          <svg class="w-4 h-4 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+          WebRTC Stream Telemetry
+        </h2>
+        <span class="text-[11px] font-mono text-slate-500" id="clock-display">00:00:00</span>
+      </div>
+
+      <div class="p-4 space-y-4 text-xs">
+        <!-- Connection Health Card -->
+        <div class="bg-slate-950/70 border border-slate-800 rounded-lg p-3 space-y-2">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Connection Diagnostics</div>
+          <div class="grid grid-cols-2 gap-2 text-slate-300 font-mono text-[11px]">
+            <div>
+              <span class="text-slate-500 block text-[10px]">PC STATE</span>
+              <span id="stat-pc-state" class="text-amber-400 font-semibold">new</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block text-[10px]">ICE STATE</span>
+              <span id="stat-ice-state" class="text-slate-400">new</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block text-[10px]">SIGNALING</span>
+              <span id="stat-signaling" class="text-slate-400">stable</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block text-[10px]">TRACKS</span>
+              <span id="stat-tracks" class="text-slate-400">none</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Video Metrics Card -->
+        <div class="bg-slate-950/70 border border-slate-800 rounded-lg p-3 space-y-2">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Stream Metrics</div>
+          <div class="grid grid-cols-2 gap-2 text-slate-300 font-mono text-[11px]">
+            <div>
+              <span class="text-slate-500 block text-[10px]">RESOLUTION</span>
+              <span id="stat-dimensions" class="text-slate-300">-</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block text-[10px]">FPS (FRAMES)</span>
+              <span id="stat-fps" class="text-slate-300">0 fps</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block text-[10px]">BITRATE</span>
+              <span id="stat-bitrate" class="text-slate-300">0 kbps</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block text-[10px]">PACKET LOSS</span>
+              <span id="stat-packetloss" class="text-slate-300">0</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Log / Event Feed -->
+        <div class="space-y-1.5">
+          <div class="flex items-center justify-between text-[11px] text-slate-400 font-medium">
+            <span>ACTIVITY CONSOLE</span>
+            <button id="btn-clear-logs" class="text-[10px] text-slate-500 hover:text-slate-300">Clear</button>
+          </div>
+          <pre id="status" class="bg-slate-950 p-2.5 rounded-lg border border-slate-800/90 font-mono text-[10px] text-slate-400 h-36 overflow-y-auto whitespace-pre-wrap leading-relaxed select-text">Ready. Initializing WebRTC stream listener...</pre>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- OBS Setup Guide Modal -->
+  <div id="modal-guide" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-base font-semibold text-white flex items-center gap-2">
+          <svg class="w-5 h-5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+          OBS Studio & GStreamer WebRTC Setup
+        </h3>
+        <button id="btn-close-guide" class="text-slate-400 hover:text-white p-1 rounded-lg">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      <div class="space-y-4 text-xs text-slate-300 leading-relaxed">
+        <div class="space-y-1">
+          <h4 class="font-semibold text-white">How the WebRTC Stream Works</h4>
+          <p>This viewer connects to the <code class="bg-slate-950 px-1 py-0.5 rounded text-indigo-300">obs-gstreamer</code> plugin in OBS Studio via the standard <strong>WHEP</strong> (WebRTC HTTP Egress Protocol) protocol.</p>
+        </div>
+
+        <div class="space-y-2">
+          <h4 class="font-semibold text-white">1. Configure OBS Studio Output</h4>
+          <p>In OBS Studio, configure the GStreamer output with WebRTC enabled:</p>
+          <ul class="list-disc pl-5 space-y-1 text-slate-400">
+            <li>Output Type: <strong class="text-slate-200">GStreamer WebRTC</strong></li>
+            <li>HTTP Port: <strong class="text-slate-200">8888</strong> (default)</li>
+            <li>Web Root: <code class="text-indigo-300">.webrtc-webroot</code></li>
+          </ul>
+        </div>
+
+        <div class="space-y-2">
+          <h4 class="font-semibold text-white">2. GStreamer Encoder Pipeline Example</h4>
+          <p>Hardware accelerated low-latency H.264 encoding pipeline:</p>
+          <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-800 font-mono text-[11px] text-slate-300 overflow-x-auto select-all">
+x264enc tune=zerolatency speed-preset=veryfast bitrate=3000 bframes=0 cabac=false key-int-max=30 ! video/x-h264, profile=constrained-baseline, stream-format=byte-stream ! h264parse config-interval=-1 ! rtph264pay name=pay0 pt=102 config-interval=-1
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <h4 class="font-semibold text-white">3. Start Streaming</h4>
+          <p>When you click <strong>Start Output</strong> in OBS, the built-in HTTP server begins listening on port 8888. This monitor will immediately auto-detect the stream, perform the WebRTC handshake via WHEP, and begin ultra-low latency playback.</p>
+        </div>
+      </div>
+
+      <div class="pt-3 border-t border-slate-800 flex justify-end">
+        <button id="btn-modal-got-it" class="bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-1.5 px-4 rounded-lg text-xs transition">
+          Got it
+        </button>
+      </div>
+    </div>
   </div>
+
   <script src="app.js"></script>
 </body>
 </html>
