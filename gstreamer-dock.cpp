@@ -42,7 +42,12 @@ struct gstreamer_output_config {
 	QString webrtc_web_root;
 	QString pipeline = "autovideosink sync=false";
 	bool auto_start = true;
+	bool use_gpu_encoder = false;
+	QString gpu_encoder_type = "qsvh265enc";
+	QString color_space_mode = "auto_nv12";
+	int bitrate_kbps = 4000;
 	obs_output_t *output = nullptr;
+	obs_encoder_t *encoder = nullptr;
 	obs_view_t *view = nullptr;
 	video_t *video  = nullptr;
 };
@@ -170,12 +175,22 @@ static void select_source(gstreamer_output_config &config)
 
 static void stop_output(gstreamer_output_config &config)
 {
-	if (!config.output)
-		return;
-	if (obs_output_active(config.output))
-		obs_output_stop(config.output);
-	obs_output_release(config.output);
-	config.output = nullptr;
+	if (config.encoder) {
+		obs_encoder_stop(config.encoder);
+		obs_encoder_release(config.encoder);
+		config.encoder = nullptr;
+	}
+	if (config.output) {
+		if (obs_output_active(config.output))
+			obs_output_stop(config.output);
+		obs_output_release(config.output);
+		config.output = nullptr;
+	}
+	if (config.view) {
+		obs_view_destroy(config.view);
+		config.view = nullptr;
+		config.video = nullptr;
+	}
 }
 
 static obs_data_t *output_settings(const gstreamer_output_config &config)
@@ -216,6 +231,10 @@ static void save_configurations(const gstreamer_dock_state *state)
 		settings.setValue("webrtc_web_root", config.webrtc_web_root);
 		settings.setValue("auto_start", config.auto_start);
 		settings.setValue("pipeline", config.pipeline);
+		settings.setValue("use_gpu_encoder", config.use_gpu_encoder);
+		settings.setValue("gpu_encoder_type", config.gpu_encoder_type);
+		settings.setValue("color_space_mode", config.color_space_mode);
+		settings.setValue("bitrate_kbps", config.bitrate_kbps);
 		settings.endGroup();
 	}
 	settings.endGroup();
@@ -242,6 +261,10 @@ static void load_configurations(gstreamer_dock_state *state)
 		config.webrtc_web_root = settings.value("webrtc_web_root", config.webrtc_web_root).toString();
 		config.auto_start = settings.value("auto_start", config.auto_start).toBool();
 		config.pipeline = settings.value("pipeline", config.pipeline).toString();
+		config.use_gpu_encoder = settings.value("use_gpu_encoder", config.use_gpu_encoder).toBool();
+		config.gpu_encoder_type = settings.value("gpu_encoder_type", config.gpu_encoder_type).toString();
+		config.color_space_mode = settings.value("color_space_mode", config.color_space_mode).toString();
+		config.bitrate_kbps = settings.value("bitrate_kbps", config.bitrate_kbps).toInt();
 		state->configurations.push_back(config);
 		settings.endGroup();
 	}
@@ -282,6 +305,24 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 	QLineEdit *web_root = new QLineEdit(config->webrtc_web_root);
 	web_root->setPlaceholderText("~/.local/share/obs-gstreamer/webrtc");
 	QLineEdit *pipeline = new QLineEdit(config->pipeline);
+	QCheckBox *use_gpu_encoder = new QCheckBox("Zero-Copy GPU Texture Encoder");
+	use_gpu_encoder->setChecked(config->use_gpu_encoder);
+	QComboBox *gpu_encoder_type = new QComboBox();
+	gpu_encoder_type->addItem("Intel QSV H.265 (qsvh265enc)", "qsvh265enc");
+	gpu_encoder_type->addItem("Intel QSV H.264 (qsvh264enc)", "qsvh264enc");
+	gpu_encoder_type->addItem("Linux VA-API H.265 (vaapih265enc)", "vaapih265enc");
+	gpu_encoder_type->addItem("Linux VA-API H.264 (vaapih264enc)", "vaapih264enc");
+	gpu_encoder_type->addItem("NVIDIA NVENC H.265 (nvh265enc)", "nvh265enc");
+	gpu_encoder_type->addItem("NVIDIA NVENC H.264 (nvh264enc)", "nvh264enc");
+	int enc_idx = gpu_encoder_type->findData(config->gpu_encoder_type);
+	if (enc_idx >= 0) gpu_encoder_type->setCurrentIndex(enc_idx);
+
+	QComboBox *color_space_mode = new QComboBox();
+	color_space_mode->addItem("Auto NV12 (Fast OBS GPU Shader)", "auto_nv12");
+	color_space_mode->addItem("Native BGRA (Skip GPU Conversion)", "native_bgra");
+	int cs_idx = color_space_mode->findData(config->color_space_mode);
+	if (cs_idx >= 0) color_space_mode->setCurrentIndex(cs_idx);
+
 	rtsp_pipeline->setMinimumWidth(430);
 	left_form->addRow("Name", name);
 	left_form->addRow("Source type", source_type);
@@ -290,6 +331,9 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 	left_form->addRow("Output mode", mode);
 	left_form->addRow("RTSP mount", mount);
 	left_form->addRow("RTSP service", service);
+	left_form->addRow("Hardware Encode", use_gpu_encoder);
+	left_form->addRow("HW Encoder", gpu_encoder_type);
+	left_form->addRow("Color Conversion", color_space_mode);
 	right_form->addRow("RTSP pipeline", rtsp_pipeline);
 	right_form->addRow("WebRTC HTTP port", http_port);
 	right_form->addRow("WebRTC web root", web_root);
@@ -299,7 +343,7 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 	right_form->addRow(buttons);
 	columns->addWidget(left_panel, 1);
 	columns->addWidget(right_panel, 2);
-	auto update_enabled = [source_type, source, scene, mode, mount, service, rtsp_pipeline, signaling, http_port, web_root, auto_start, pipeline]() {
+	auto update_enabled = [source_type, source, scene, mode, mount, service, rtsp_pipeline, signaling, http_port, web_root, auto_start, pipeline, use_gpu_encoder, gpu_encoder_type, color_space_mode]() {
 		source->setEnabled(source_type->currentText() == "Source");
 		scene->setEnabled(source_type->currentText() == "Scene");
 		mount->setEnabled(mode->currentText() == "RTSP");
@@ -310,9 +354,12 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 		web_root->setEnabled(mode->currentText() == "WebRTC");
 		auto_start->setEnabled(true);
 		pipeline->setEnabled(mode->currentText() == "Pipeline");
+		gpu_encoder_type->setEnabled(use_gpu_encoder->isChecked());
+		color_space_mode->setEnabled(use_gpu_encoder->isChecked());
 	};
 	QObject::connect(source_type, &QComboBox::currentTextChanged, update_enabled);
 	QObject::connect(mode, &QComboBox::currentTextChanged, update_enabled);
+	QObject::connect(use_gpu_encoder, &QCheckBox::toggled, update_enabled);
 	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 	update_enabled();
@@ -331,6 +378,9 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 	config->webrtc_web_root = web_root->text();
 	config->auto_start = auto_start->isChecked();
 	config->pipeline = pipeline->text();
+	config->use_gpu_encoder = use_gpu_encoder->isChecked();
+	config->gpu_encoder_type = gpu_encoder_type->currentData().toString();
+	config->color_space_mode = color_space_mode->currentData().toString();
 	if (config->name.isEmpty())
 		config->name = "Output";
 	return true;
@@ -352,7 +402,10 @@ static void refresh_rows(gstreamer_dock_state *state)
 		QHBoxLayout *row_layout = new QHBoxLayout(row_widget);
 		row_layout->setContentsMargins(8, 2, 8, 2);
 		row_layout->setSpacing(6);
-		QLabel *label = new QLabel(QString("%1  [%2]").arg(config.name, status));
+		QString label_text = config.use_gpu_encoder ?
+			QString("%1 [GPU: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status) :
+			QString("%1  [%2]").arg(config.name, status);
+		QLabel *label = new QLabel(label_text);
 		QPushButton *start = new QPushButton("Start");
 		QPushButton *stop = new QPushButton("Stop");
 		start->setFixedSize(64, 24);
@@ -386,6 +439,21 @@ static void start_selected(gstreamer_dock_state *state, int row)
 	obs_data_release(settings);
 	if (!config.output)	return;
 	select_source(config);
+
+	if (config.use_gpu_encoder) {
+		const char *enc_id = config.gpu_encoder_type.contains("h264") ?
+			"hjm-gstreamer-encoder-tex-h264" : "hjm-gstreamer-encoder-tex-h265";
+		obs_data_t *enc_settings = obs_data_create();
+		obs_data_set_string(enc_settings, "encoder_type", config.gpu_encoder_type.toUtf8().constData());
+		obs_data_set_string(enc_settings, "color_space_mode", config.color_space_mode.toUtf8().constData());
+		obs_data_set_int(enc_settings, "bitrate", config.bitrate_kbps > 0 ? config.bitrate_kbps : 4000);
+		config.encoder = obs_video_encoder_create(enc_id, "gst_hw_tex_encoder", enc_settings, nullptr);
+		obs_data_release(enc_settings);
+		if (config.encoder) {
+			obs_output_set_video_encoder(config.output, config.encoder);
+			obs_encoder_start(config.encoder, nullptr, nullptr);
+		}
+	}
 
 	if (!obs_output_start(config.output)) stop_output(config);
 	refresh_rows(state);
