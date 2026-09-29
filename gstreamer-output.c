@@ -45,6 +45,7 @@ typedef struct {
 	obs_output_t *output;
 	obs_data_t *settings;
 	struct obs_video_info ovi;
+	GMutex lock;
 } data_t;
 
 static const char *obs_video_format_to_gst_format(enum video_format format)
@@ -98,9 +99,32 @@ static gsize obs_video_format_buffer_size(enum video_format format, int width, i
 
 static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer user_data);
 
+static void client_closed_cb(GstRTSPClient *client, gpointer user_data)
+{
+	blog(LOG_INFO, "[obs-gstreamer] RTSP client disconnected");
+}
+
 static void client_connected_cb(GstRTSPServer *server, GstRTSPClient *client, gpointer user_data)
 {
 	blog(LOG_INFO, "[obs-gstreamer] RTSP client connected");
+	g_signal_connect(client, "closed", G_CALLBACK(client_closed_cb), user_data);
+}
+
+static void media_unprepared_cb(GstRTSPMedia *media, gpointer user_data)
+{
+	data_t *data = user_data;
+	blog(LOG_INFO, "[obs-gstreamer] RTSP media unprepared (all clients disconnected), resetting appsrc");
+
+	g_mutex_lock(&data->lock);
+	if (data->video) {
+		gst_object_unref(data->video);
+		data->video = NULL;
+	}
+	if (data->audio) {
+		gst_object_unref(data->audio);
+		data->audio = NULL;
+	}
+	g_mutex_unlock(&data->lock);
 }
 
 static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media, gpointer user_data)
@@ -117,21 +141,25 @@ static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media
 		return;
 	}
 
+	GstElement *appsrc_audio = gst_bin_get_by_name(GST_BIN(element), "appsrc_audio");
+	if (appsrc_audio)
+		gst_app_src_set_stream_type(GST_APP_SRC(appsrc_audio), GST_APP_STREAM_TYPE_STREAM);
+	gst_app_src_set_stream_type(GST_APP_SRC(appsrc), GST_APP_STREAM_TYPE_STREAM);
+
+	g_mutex_lock(&data->lock);
 	if (data->video)
 		gst_object_unref(data->video);
-
 	data->video = appsrc;
 
-	GstElement *appsrc_audio = gst_bin_get_by_name(GST_BIN(element), "appsrc_audio");
 	if (data->audio)
 		gst_object_unref(data->audio);
 	data->audio = appsrc_audio;
-	if (data->audio)
-		gst_app_src_set_stream_type(GST_APP_SRC(data->audio), GST_APP_STREAM_TYPE_STREAM);
+	g_mutex_unlock(&data->lock);
+
+	g_signal_connect(media, "unprepared", G_CALLBACK(media_unprepared_cb), data);
 
 	gst_bus_add_watch(bus, bus_callback, data);
 	gst_object_unref(bus);
-	gst_app_src_set_stream_type(GST_APP_SRC(data->video), GST_APP_STREAM_TYPE_STREAM);
 	blog(LOG_INFO, "[obs-gstreamer] RTSP media configured, appsrc ready for scene output");
 
 	if (gst_element_set_state(element, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
@@ -177,6 +205,7 @@ void *gstreamer_output_create(obs_data_t *settings, obs_output_t *output)
 {
 	data_t *data = g_new0(data_t, 1);
 
+	g_mutex_init(&data->lock);
 	data->output = output;
 	data->settings = settings;
 	blog(LOG_INFO, "gstreamer_output_create = called");
@@ -188,14 +217,17 @@ void gstreamer_output_destroy(void *p)
 	data_t *data = (data_t *)p;
 
 	if (data->webrtc) {
+		g_mutex_lock(&data->lock);
 		if (data->video) {
 			gst_object_unref(data->video);
 			data->video = NULL;
 		}
+		g_mutex_unlock(&data->lock);
 		gstreamer_webrtc_destroy(data->webrtc);
 		data->webrtc = NULL;
 	}
 
+	g_mutex_lock(&data->lock);
 	if (data->video) {
 		gst_object_unref(data->video);
 		data->video = NULL;
@@ -205,6 +237,7 @@ void gstreamer_output_destroy(void *p)
 		gst_object_unref(data->audio);
 		data->audio = NULL;
 	}
+	g_mutex_unlock(&data->lock);
 
 	if (data->server) {
 		if (data->mounts && data->mount_point) {
@@ -224,6 +257,7 @@ void gstreamer_output_destroy(void *p)
 
 	g_free(data->mount_point);
 	data->mount_point = NULL;
+	g_mutex_clear(&data->lock);
 	g_free(data);
 	blog(LOG_INFO, "gstreamer_output_destroy = end");
 }
@@ -289,7 +323,9 @@ bool gstreamer_output_start(void *p)
 			return false;
 		}
 		g_free(error);
+		g_mutex_lock(&data->lock);
 		data->video = gstreamer_webrtc_appsrc(data->webrtc);
+		g_mutex_unlock(&data->lock);
 		blog(LOG_INFO, "[obs-gstreamer] WebRTC output started");
 	} else {
 		GError *err = NULL;
@@ -308,14 +344,18 @@ bool gstreamer_output_start(void *p)
 			return false;
 		}
 
+		g_mutex_lock(&data->lock);
 		data->video = gst_bin_get_by_name(GST_BIN(data->pipe), "appsrc_video");
 		if (!data->video) {
+			g_mutex_unlock(&data->lock);
 			blog(LOG_ERROR, "gstreamer_output_start = appsrc_video element not found in pipeline");
 			gst_object_unref(data->pipe);
 			data->pipe = NULL;
 			return false;
 		}
 		data->audio = gst_bin_get_by_name(GST_BIN(data->pipe), "appsrc_audio");
+		g_mutex_unlock(&data->lock);
+
 		GstBus *bus = gst_element_get_bus(data->pipe);
 		gst_bus_add_watch(bus, bus_callback, data);
 		gst_object_unref(bus);
@@ -335,17 +375,23 @@ void gstreamer_output_stop(void *p, uint64_t ts)
 	obs_output_end_data_capture(data->output);
 	blog(LOG_INFO, "gstreamer_output_stop = obs_output_end_data_capture stopped");
 
+	g_mutex_lock(&data->lock);
+	GstElement *video = data->video;
+	data->video = NULL;
+	GstElement *audio = data->audio;
+	data->audio = NULL;
+	g_mutex_unlock(&data->lock);
+
+	if (video) {
+		gst_app_src_end_of_stream(GST_APP_SRC(video));
+		gst_object_unref(video);
+	}
+	if (audio) {
+		gst_app_src_end_of_stream(GST_APP_SRC(audio));
+		gst_object_unref(audio);
+	}
+
 	if (data->server) {
-		if (data->video) {
-			gst_app_src_end_of_stream(GST_APP_SRC(data->video));
-			gst_object_unref(data->video);
-			data->video = NULL;
-		}
-		if (data->audio) {
-			gst_app_src_end_of_stream(GST_APP_SRC(data->audio));
-			gst_object_unref(data->audio);
-			data->audio = NULL;
-		}
 		if (data->mounts && data->mount_point) {
 			gst_rtsp_mount_points_remove_factory(data->mounts, data->mount_point);
 		}
@@ -365,26 +411,12 @@ void gstreamer_output_stop(void *p, uint64_t ts)
 	}
 
 	if (data->webrtc) {
-		if (data->video) {
-			gst_object_unref(data->video);
-			data->video = NULL;
-		}
 		gstreamer_webrtc_destroy(data->webrtc);
 		data->webrtc = NULL;
 		blog(LOG_INFO, "gstreamer_output_stop = WebRTC server stopped");
 	}
 
 	if (data->pipe) {
-		if (data->video) {
-			gst_app_src_end_of_stream(GST_APP_SRC(data->video));
-			gst_object_unref(data->video);
-			data->video = NULL;
-		}
-		if (data->audio) {
-			gst_app_src_end_of_stream(GST_APP_SRC(data->audio));
-			gst_object_unref(data->audio);
-			data->audio = NULL;
-		}
 		GstBus *bus = gst_element_get_bus(data->pipe);
 		if (bus) {
 			gst_bus_remove_watch(bus);
@@ -403,6 +435,15 @@ void gstreamer_output_stop(void *p, uint64_t ts)
 void gstreamer_output_encoded_packet(void *p, struct encoder_packet *packet)
 {
 	data_t *data = (data_t *)p;
+	if (!data)
+		return;
+
+	g_mutex_lock(&data->lock);
+	GstElement *video = data->video ? gst_object_ref(data->video) : NULL;
+	g_mutex_unlock(&data->lock);
+
+	if (!video)
+		return;
 
 	GstBuffer *buffer = gst_buffer_new_allocate(NULL, packet->size, NULL);
 	gst_buffer_fill(buffer, 0, packet->data, packet->size);
@@ -412,52 +453,69 @@ void gstreamer_output_encoded_packet(void *p, struct encoder_packet *packet)
 
 	gst_buffer_set_flags(buffer, packet->keyframe ? 0 : GST_BUFFER_FLAG_DELTA_UNIT);
 
-	GstElement *appsrc = data->video;
-
-	gst_app_src_push_buffer(GST_APP_SRC(appsrc), buffer);
-
-	//blog(LOG_INFO, "gstreamer_output_encoded_packet = complete");
+	gst_app_src_push_buffer(GST_APP_SRC(video), buffer);
+	gst_object_unref(video);
 }
 
 void gstreamer_output_raw_video(void *p, struct video_data *frame)
 {
 	data_t *data = (data_t *)p;
-	if (!data->video)
+	if (!data)
 		return;
+
+	g_mutex_lock(&data->lock);
+	GstElement *video = data->video ? gst_object_ref(data->video) : NULL;
+	g_mutex_unlock(&data->lock);
+
+	if (!video)
+		return;
+
 	data->raw_video_frames++;
 
 	// Wrap OBS frame memory directly to avoid a per-frame copy.
 	GstBuffer *buffer = gst_buffer_new_wrapped_full(0, frame->data[0], data->buffer_size, 0, data->buffer_size, NULL, NULL);
 
-	//GST_BUFFER_PTS(buffer) = frame->timestamp;
-
-	GstFlowReturn result = gst_app_src_push_buffer(GST_APP_SRC(data->video), buffer);
+	GstFlowReturn result = gst_app_src_push_buffer(GST_APP_SRC(video), buffer);
 	if (data->webrtc_output && (data->raw_video_frames == 1 || data->raw_video_frames % 60 == 0))
 		blog(LOG_INFO, "[obs-gstreamer] WebRTC raw frame %llu pushed, result=%s, size=%zu",
 			(unsigned long long)data->raw_video_frames, gst_flow_get_name(result), data->buffer_size);
 	if (result != GST_FLOW_OK && result != GST_FLOW_FLUSHING)
 		blog(LOG_WARNING, "[obs-gstreamer] RTSP appsrc push failed: %s", gst_flow_get_name(result));
-	//blog(LOG_INFO, "gstreamer_output_raw_video");
+
+	gst_object_unref(video);
 }
 
 void gstreamer_output_raw_audio(void *p, struct audio_data *frame)
 {
 	data_t *data = (data_t *)p;
-	if (!data || !data->audio || !frame || frame->frames == 0)
+	if (!data || !frame || frame->frames == 0)
+		return;
+
+	g_mutex_lock(&data->lock);
+	GstElement *audio = data->audio ? gst_object_ref(data->audio) : NULL;
+	g_mutex_unlock(&data->lock);
+
+	if (!audio)
 		return;
 
 	struct obs_audio_info oai;
-	if (!obs_get_audio_info(&oai))
+	if (!obs_get_audio_info(&oai)) {
+		gst_object_unref(audio);
 		return;
+	}
 
 	size_t channels = get_audio_channels(oai.speakers);
-	if (channels == 0)
+	if (channels == 0) {
+		gst_object_unref(audio);
 		return;
+	}
 
 	size_t total_size = frame->frames * channels * sizeof(float);
 	GstBuffer *buffer = gst_buffer_new_allocate(NULL, total_size, NULL);
-	if (!buffer)
+	if (!buffer) {
+		gst_object_unref(audio);
 		return;
+	}
 
 	GstMapInfo map;
 	if (gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
@@ -480,7 +538,8 @@ void gstreamer_output_raw_audio(void *p, struct audio_data *frame)
 	if (oai.samples_per_sec > 0)
 		GST_BUFFER_DURATION(buffer) = (GstClockTime)frame->frames * GST_SECOND / oai.samples_per_sec;
 
-	gst_app_src_push_buffer(GST_APP_SRC(data->audio), buffer);
+	gst_app_src_push_buffer(GST_APP_SRC(audio), buffer);
+	gst_object_unref(audio);
 }
 
 void gstreamer_output_get_defaults(obs_data_t *settings)
