@@ -1,7 +1,20 @@
 (function () {
   'use strict';
 
-  // DOM Elements
+  // Navigation & Tabs
+  var tabNavVnc = document.getElementById('tab-nav-vnc');
+  var tabNavWebrtc = document.getElementById('tab-nav-webrtc');
+  var viewVnc = document.getElementById('view-vnc');
+  var viewWebrtc = document.getElementById('view-webrtc');
+  var navVncDot = document.getElementById('nav-vnc-dot');
+  var navWebrtcDot = document.getElementById('nav-webrtc-dot');
+  var vncStatusText = document.getElementById('vnc-status-text');
+  var btnRestartVnc = document.getElementById('btn-restart-vnc');
+  var btnReloadIframe = document.getElementById('btn-reload-iframe');
+  var vncIframe = document.getElementById('vnc-iframe');
+  var btnGotoDesktop = document.getElementById('btn-goto-desktop');
+
+  // Video Player Elements
   var video = document.getElementById('video');
   var statusEl = document.getElementById('status');
   var testCanvas = document.getElementById('test-canvas');
@@ -11,7 +24,6 @@
   var lblEndpoint = document.getElementById('lbl-endpoint');
   var lblPortStatus = document.getElementById('lbl-port-status');
   var lblRetryCountdown = document.getElementById('lbl-retry-countdown');
-  var btnReconnectNow = document.getElementById('btn-reconnect-now');
   var btnSwitchTestPattern = document.getElementById('btn-switch-test-pattern');
 
   var badgeSourceMode = document.getElementById('badge-source-mode');
@@ -21,9 +33,6 @@
   var badgeResolution = document.getElementById('badge-resolution');
   var badgeBitrate = document.getElementById('badge-bitrate');
   var audioVuMeter = document.getElementById('audio-vu-meter');
-
-  var backendDot = document.getElementById('backend-dot');
-  var backendText = document.getElementById('backend-text');
   var clockDisplay = document.getElementById('clock-display');
 
   // Stats Elements
@@ -35,14 +44,6 @@
   var statFps = document.getElementById('stat-fps');
   var statBitrate = document.getElementById('stat-bitrate');
   var statPacketloss = document.getElementById('stat-packetloss');
-
-  // Source Selector Buttons
-  var btnModeWhep = document.getElementById('btn-mode-whep');
-  var btnModeTest = document.getElementById('btn-mode-test');
-  var btnModeCustom = document.getElementById('btn-mode-custom');
-  var customWhepBar = document.getElementById('custom-whep-bar');
-  var inputCustomUrl = document.getElementById('input-custom-url');
-  var btnConnectCustom = document.getElementById('btn-connect-custom');
 
   // Player Controls
   var btnPlayPause = document.getElementById('btn-play-pause');
@@ -66,8 +67,8 @@
   var modalGuide = document.getElementById('modal-guide');
 
   // State Variables
-  var currentMode = 'whep'; // 'whep' | 'test' | 'custom'
-  var whepUrl = '/whep';
+  var activeView = 'vnc'; // 'vnc' | 'webrtc'
+  var isTestPattern = false;
   var pc = null;
   var loopbackSender = null;
   var reconnectTimer = null;
@@ -77,30 +78,123 @@
   var statsInterval = null;
   var prevBytesReceived = 0;
   var prevStatsTimestamp = 0;
-  var backendOnline = false;
   var isManualDisconnect = false;
-
-  // Test Pattern Generator State
   var testAnimationId = null;
   var testAudioCtx = null;
-  var testOscillator = null;
 
-  // Logger helper
   function log(msg, type) {
     var now = new Date();
     var timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
-    var prefix = '[' + timeStr + '] ';
-    var line = prefix + msg;
-    console.log('[obs-gstreamer]', line);
-
+    var line = '[' + timeStr + '] ' + msg;
+    console.log('[obs-app]', line);
     if (statusEl) {
       statusEl.textContent = line + '\n' + statusEl.textContent.slice(0, 4000);
     }
   }
 
+  // Tab Navigation Handling
+  function switchTab(view) {
+    activeView = view;
+    if (view === 'vnc') {
+      viewVnc.classList.remove('hidden');
+      viewWebrtc.classList.add('hidden');
+      tabNavVnc.className = 'px-3.5 py-1.5 rounded-md font-medium transition flex items-center gap-2 bg-indigo-600 text-white shadow-sm';
+      tabNavWebrtc.className = 'px-3.5 py-1.5 rounded-md font-medium transition flex items-center gap-2 text-slate-400 hover:text-slate-200';
+      badgeSourceMode.textContent = 'OBS Desktop Active';
+    } else {
+      viewVnc.classList.add('hidden');
+      viewWebrtc.classList.remove('hidden');
+      tabNavWebrtc.className = 'px-3.5 py-1.5 rounded-md font-medium transition flex items-center gap-2 bg-indigo-600 text-white shadow-sm';
+      tabNavVnc.className = 'px-3.5 py-1.5 rounded-md font-medium transition flex items-center gap-2 text-slate-400 hover:text-slate-200';
+      badgeSourceMode.textContent = isTestPattern ? 'Test Pattern' : 'WebRTC Live';
+      if (!isTestPattern) {
+        connectWhep();
+      }
+    }
+  }
+
+  tabNavVnc.addEventListener('click', function () { switchTab('vnc'); });
+  tabNavWebrtc.addEventListener('click', function () { switchTab('webrtc'); });
+  if (btnGotoDesktop) {
+    btnGotoDesktop.addEventListener('click', function () { switchTab('vnc'); });
+  }
+
+  btnReloadIframe.addEventListener('click', function () {
+    if (vncIframe) {
+      var currentSrc = vncIframe.src;
+      vncIframe.src = 'about:blank';
+      setTimeout(function () {
+        vncIframe.src = currentSrc;
+      }, 100);
+    }
+  });
+
+  // Restart VNC & OBS Studio
+  btnRestartVnc.addEventListener('click', function () {
+    vncStatusText.textContent = 'Restarting OBS...';
+    log('Triggering restart of OBS Studio and VNC session...', 'info');
+
+    fetch('/api/vnc/start', { method: 'POST' })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        log('OBS restart command completed', 'info');
+        setTimeout(function () {
+          checkVncStatus();
+          btnReloadIframe.click();
+        }, 1500);
+      })
+      .catch(function (err) {
+        log('Restart request error: ' + err.message, 'error');
+      });
+  });
+
+  // VNC & OBS Health Check
+  function checkVncStatus() {
+    fetch('/api/vnc/status')
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data && data.vncOnline && data.novncOnline) {
+          navVncDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+          vncStatusText.textContent = data.obsRunning ? 'OBS & VNC Active' : 'VNC Desktop Ready';
+        } else {
+          navVncDot.className = 'w-2 h-2 rounded-full bg-amber-400';
+          vncStatusText.textContent = 'Desktop Starting...';
+        }
+      })
+      .catch(function () {});
+  }
+
+  setInterval(checkVncStatus, 3000);
+  checkVncStatus();
+
+  // WebRTC Stream Status
+  function checkStreamStatus() {
+    fetch('/api/status')
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data && data.online) {
+          navWebrtcDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+          lblPortStatus.className = 'text-emerald-400 font-semibold';
+          lblPortStatus.textContent = '127.0.0.1:8888 (STREAMING)';
+
+          // If stream just became available while in player view, connect immediately!
+          if (activeView === 'webrtc' && !isTestPattern && (!pc || pc.connectionState === 'closed')) {
+            connectWhep();
+          }
+        } else {
+          navWebrtcDot.className = 'w-2 h-2 rounded-full bg-slate-500';
+          lblPortStatus.className = 'text-amber-400 font-semibold';
+          lblPortStatus.textContent = '127.0.0.1:8888 (Waiting for OBS)';
+        }
+      })
+      .catch(function () {});
+  }
+
+  setInterval(checkStreamStatus, 3000);
+  checkStreamStatus();
+
   function setStreamBadge(state, label) {
     if (!badgeStreamState || !streamPulse || !streamText) return;
-
     if (state === 'live') {
       streamPulse.className = 'w-2 h-2 rounded-full bg-red-500 animate-pulse';
       badgeStreamState.className = 'px-2.5 py-1 rounded-md text-xs font-semibold uppercase tracking-wider backdrop-blur-md bg-red-950/80 border border-red-700/80 text-red-200 flex items-center gap-2 shadow-lg';
@@ -119,61 +213,18 @@
       streamPulse.className = 'w-2 h-2 rounded-full bg-slate-500';
       badgeStreamState.className = 'px-2.5 py-1 rounded-md text-xs font-semibold uppercase tracking-wider backdrop-blur-md bg-slate-900/80 border border-slate-700 text-slate-300 flex items-center gap-2 shadow-lg';
       streamText.textContent = label || 'OFFLINE';
-      if (currentMode !== 'test') {
+      if (!isTestPattern) {
         offlineOverlay.classList.remove('hidden');
       }
     }
   }
 
-  // Real-time clock display in side panel
+  // Clock in telemetry
   setInterval(function () {
-    var now = new Date();
-    if (clockDisplay) {
-      clockDisplay.textContent = now.toTimeString().split(' ')[0];
-    }
+    if (clockDisplay) clockDisplay.textContent = new Date().toTimeString().split(' ')[0];
   }, 1000);
 
-  // Poll backend health status via /api/status
-  function checkBackendHealth() {
-    fetch('/api/status')
-      .then(function (res) { return res.json(); })
-      .then(function (data) {
-        var wasOnline = backendOnline;
-        backendOnline = Boolean(data && data.online);
-
-        if (backendDot && backendText) {
-          if (backendOnline) {
-            backendDot.className = 'w-2 h-2 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400/50';
-            backendText.textContent = 'OBS Port 8888 Online';
-            lblPortStatus.className = 'text-emerald-400 font-semibold';
-            lblPortStatus.textContent = '127.0.0.1:8888 (LISTENING)';
-          } else {
-            backendDot.className = 'w-2 h-2 rounded-full bg-amber-400';
-            backendText.textContent = 'OBS Port 8888 Offline';
-            lblPortStatus.className = 'text-amber-400 font-semibold';
-            lblPortStatus.textContent = '127.0.0.1:8888 (ECONNREFUSED - Waiting for OBS)';
-          }
-        }
-
-        // If backend just transitioned to online while in WHEP mode and offline, connect immediately!
-        if (!wasOnline && backendOnline && currentMode === 'whep' && (!pc || pc.connectionState === 'closed')) {
-          log('OBS GStreamer server detected online on port 8888! Initiating connection...', 'info');
-          connectWhep();
-        }
-      })
-      .catch(function () {
-        if (backendDot && backendText) {
-          backendDot.className = 'w-2 h-2 rounded-full bg-slate-600';
-          backendText.textContent = 'Backend Offline';
-        }
-      });
-  }
-
-  setInterval(checkBackendHealth, 3000);
-  checkBackendHealth();
-
-  // Clean teardown of existing connections
-  function cleanupConnection() {
+  function cleanupWebRtc() {
     clearTimeout(reconnectTimer);
     clearInterval(countdownTimer);
     clearInterval(statsInterval);
@@ -182,35 +233,25 @@
     if (pc) {
       try {
         pc.ontrack = null;
-        pc.oniceconnectionstatechange = null;
-        pc.onconnectionstatechange = null;
-        pc.onsignalingstatechange = null;
         pc.close();
       } catch (e) {}
       pc = null;
     }
-
     if (loopbackSender) {
-      try {
-        loopbackSender.close();
-      } catch (e) {}
+      try { loopbackSender.close(); } catch (e) {}
       loopbackSender = null;
     }
-
     if (testAnimationId) {
       cancelAnimationFrame(testAnimationId);
       testAnimationId = null;
     }
-
     if (testAudioCtx) {
       try { testAudioCtx.close(); } catch (e) {}
       testAudioCtx = null;
     }
-
     if (video.srcObject) {
       try {
-        var tracks = video.srcObject.getTracks();
-        tracks.forEach(function (t) { t.stop(); });
+        video.srcObject.getTracks().forEach(function (t) { t.stop(); });
       } catch (e) {}
       video.srcObject = null;
     }
@@ -227,19 +268,15 @@
     audioVuMeter.classList.add('hidden');
   }
 
-  // Schedule auto-reconnect with countdown
   function scheduleReconnect(delayMs) {
     clearTimeout(reconnectTimer);
     clearInterval(countdownTimer);
-
-    if (isManualDisconnect) return;
+    if (isManualDisconnect || isTestPattern) return;
 
     var delay = delayMs || Math.min(1000 * Math.pow(1.5, reconnectAttempts++), 10000);
     reconnectSeconds = Math.ceil(delay / 1000);
 
-    if (lblRetryCountdown) {
-      lblRetryCountdown.textContent = 'in ' + reconnectSeconds + 's';
-    }
+    if (lblRetryCountdown) lblRetryCountdown.textContent = 'in ' + reconnectSeconds + 's';
 
     countdownTimer = setInterval(function () {
       reconnectSeconds--;
@@ -252,23 +289,18 @@
     }, 1000);
 
     reconnectTimer = setTimeout(function () {
-      if (currentMode === 'whep') {
-        connectWhep();
-      } else if (currentMode === 'custom') {
-        connectCustomWhep(inputCustomUrl.value.trim());
-      }
+      connectWhep();
     }, delay);
   }
 
-  // WHEP Connection Handler (Connecting to OBS GStreamer WebRTC output)
-  function connectWhep(customEndpoint) {
-    cleanupConnection();
+  // WHEP Connection
+  function connectWhep() {
+    isTestPattern = false;
+    cleanupWebRtc();
     isManualDisconnect = false;
 
-    var endpoint = customEndpoint || '/whep';
-    lblEndpoint.textContent = endpoint;
     setStreamBadge('connecting', 'Connecting...');
-    log('Opening WebRTC PeerConnection for WHEP endpoint: ' + endpoint, 'info');
+    log('Starting WebRTC handshake with /whep...', 'info');
 
     pc = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -281,8 +313,6 @@
 
     pc.onconnectionstatechange = function () {
       statPcState.textContent = pc.connectionState;
-      log('PeerConnection state: ' + pc.connectionState, 'info');
-
       if (pc.connectionState === 'connected') {
         reconnectAttempts = 0;
         setStreamBadge('live', 'LIVE');
@@ -295,34 +325,23 @@
 
     pc.oniceconnectionstatechange = function () {
       statIceState.textContent = pc.iceConnectionState;
-      log('ICE connection state: ' + pc.iceConnectionState, 'info');
     };
-
     pc.onsignalingstatechange = function () {
       statSignaling.textContent = pc.signalingState;
-      log('Signaling state: ' + pc.signalingState, 'info');
     };
 
-    // Receive-only video & audio
     pc.addTransceiver('video', { direction: 'recvonly' });
-    try {
-      pc.addTransceiver('audio', { direction: 'recvonly' });
-    } catch (e) {}
+    try { pc.addTransceiver('audio', { direction: 'recvonly' }); } catch (e) {}
 
     pc.ontrack = function (event) {
-      log('WebRTC track received: ' + event.track.kind + ' (' + event.track.id + ')', 'info');
+      log('WebRTC track received: ' + event.track.kind, 'info');
       statTracks.textContent = event.track.kind;
-
       if (!video.srcObject) {
         video.srcObject = event.streams[0] || new MediaStream([event.track]);
       } else {
         video.srcObject.addTrack(event.track);
       }
-
-      video.play().catch(function (err) {
-        log('Video autoplay interrupted: ' + err.message, 'warn');
-      });
-
+      video.play().catch(function () {});
       setStreamBadge('live', 'LIVE');
       audioVuMeter.classList.remove('hidden');
     };
@@ -332,17 +351,14 @@
       statDimensions.textContent = res;
       badgeResolution.textContent = res;
       badgeResolution.classList.remove('hidden');
-      log('Video metadata loaded: ' + res, 'info');
     };
 
-    // 1. Create Offer
     pc.createOffer()
       .then(function (offer) {
         return pc.setLocalDescription(offer);
       })
       .then(function () {
-        log('Sending SDP offer to ' + endpoint + ' (' + pc.localDescription.sdp.length + ' bytes)...', 'info');
-        return fetch(endpoint, {
+        return fetch('/whep', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/sdp',
@@ -353,328 +369,163 @@
       })
       .then(function (response) {
         var contentType = response.headers.get('content-type') || '';
-        log('WHEP response status: ' + response.status + ' (' + contentType + ')', 'info');
-
-        // Check if server returned an error
         if (!response.ok) {
-          return response.text().then(function (bodyText) {
-            // Check if error is backend offline
-            if (response.status === 500 || response.status === 502 || response.status === 503) {
-              throw new Error('OBS GStreamer stream is offline (daemon not responding on port 8888)');
-            }
-            throw new Error('WHEP server error ' + response.status + ': ' + bodyText.slice(0, 100));
+          return response.text().then(function (body) {
+            throw new Error('OBS GStreamer stream offline (status ' + response.status + ')');
           });
         }
-
-        // Check if response is HTML (e.g. Nginx fallback, warmup page, or login redirect)
         return response.text().then(function (answerSdp) {
           var trimmed = (answerSdp || '').trim();
-
-          // CRITICAL FIX: Validate SDP format before passing to setRemoteDescription!
-          // SDP must start with "v=0" or contain "v=" at line 1.
           if (contentType.includes('text/html') || trimmed.startsWith('<') || !trimmed.startsWith('v=')) {
-            log('WHEP endpoint returned HTML warmup/gateway page instead of SDP answer. Stream is offline.', 'warn');
-            throw new Error('OBS GStreamer stream is offline (received gateway HTML response instead of SDP answer)');
+            throw new Error('Stream offline (gateway returned HTML instead of SDP answer)');
           }
-
-          log('Valid SDP answer received (' + trimmed.length + ' bytes). Setting remote description...', 'info');
-          return pc.setRemoteDescription({
-            type: 'answer',
-            sdp: trimmed
-          });
+          log('Received SDP answer (' + trimmed.length + ' bytes). Setting remote description...', 'info');
+          return pc.setRemoteDescription({ type: 'answer', sdp: trimmed });
         });
       })
       .then(function () {
-        log('Remote description set successfully. Negotiating ICE candidates...', 'info');
+        log('Remote description set. Waiting for video stream...', 'info');
       })
       .catch(function (err) {
-        log('Connection notice: ' + err.message, 'error');
+        log(err.message, 'warn');
         setStreamBadge('offline', 'OFFLINE');
-
         overlayTitle.textContent = 'OBS WebRTC Stream Offline';
-        overlayDesc.textContent = err.message.includes('offline')
-          ? 'Waiting for OBS Studio to start streaming via the GStreamer WebRTC output on port 8888.'
-          : err.message;
-
+        overlayDesc.textContent = 'OBS Studio is running on the Remote Desktop. Switch to the "OBS Desktop (VNC)" tab to configure and start the stream!';
         scheduleReconnect();
       });
   }
 
-  // Built-in WebRTC Loopback Test Pattern Generator
-  // Generates dynamic broadcast test bars, audio tone, timestamp, and feeds through a real RTCPeerConnection loopback
+  // Built-in Test Pattern Generator (WebRTC Loopback)
   function startTestPattern() {
-    cleanupConnection();
+    isTestPattern = true;
+    cleanupWebRtc();
     isManualDisconnect = false;
 
     setStreamBadge('test', 'TEST PATTERN');
-    log('Initializing WebRTC Test Pattern Loopback generator...', 'info');
+    log('Running WebRTC Loopback Test Pattern generator...', 'info');
 
-    // 1. Prepare dynamic Canvas animation
     var ctx = testCanvas.getContext('2d');
     var frame = 0;
-    var colors = [
-      '#ffffff', '#ffea00', '#00e5ff', '#00e676',
-      '#e040fb', '#ff1744', '#2979ff', '#212121'
-    ];
+    var colors = ['#ffffff', '#ffea00', '#00e5ff', '#00e676', '#e040fb', '#ff1744', '#2979ff', '#212121'];
 
-    function drawTestPattern() {
+    function draw() {
       var w = testCanvas.width;
       var h = testCanvas.height;
+      var barW = w / colors.length;
 
-      // Color bars
-      var barWidth = w / colors.length;
       for (var i = 0; i < colors.length; i++) {
         ctx.fillStyle = colors[i];
-        ctx.fillRect(i * barWidth, 0, barWidth, h * 0.7);
+        ctx.fillRect(i * barW, 0, barW, h * 0.7);
       }
 
-      // Middle gradient bar
       var grad = ctx.createLinearGradient(0, 0, w, 0);
-      grad.addColorStop(0, '#000000');
-      grad.addColorStop(0.5, '#7c3aed');
-      grad.addColorStop(1, '#ffffff');
+      grad.addColorStop(0, '#000');
+      grad.addColorStop(0.5, '#6366f1');
+      grad.addColorStop(1, '#fff');
       ctx.fillStyle = grad;
       ctx.fillRect(0, h * 0.7, w, h * 0.1);
 
-      // Bottom section (Dark dashboard)
-      ctx.fillStyle = '#0f172a';
+      ctx.fillStyle = '#090d16';
       ctx.fillRect(0, h * 0.8, w, h * 0.2);
 
-      // Bouncing radar / box animation (proves live video decoding)
-      var boxX = (Math.sin(frame * 0.05) * 0.5 + 0.5) * (w - 180) + 20;
-      ctx.fillStyle = '#6366f1';
-      ctx.fillRect(boxX, h * 0.72, 140, 24);
-      ctx.fillStyle = '#ffffff';
+      var boxX = (Math.sin(frame * 0.05) * 0.5 + 0.5) * (w - 200) + 20;
+      ctx.fillStyle = '#4f46e5';
+      ctx.fillRect(boxX, h * 0.72, 160, 24);
+      ctx.fillStyle = '#fff';
       ctx.font = 'bold 12px monospace';
-      ctx.fillText('WEBRTC ACTIVE', boxX + 16, h * 0.72 + 16);
+      ctx.fillText('WEBRTC TEST STREAM', boxX + 12, h * 0.72 + 16);
 
-      // Live Timestamp & Clock
-      var now = new Date();
-      var timeStr = now.toISOString().replace('T', ' ').slice(0, 23) + ' UTC';
-
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 24px monospace';
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 22px monospace';
       ctx.fillText('OBS GSTREAMER PLUGIN - TEST PATTERN', 30, h * 0.88);
-
       ctx.fillStyle = '#38bdf8';
-      ctx.font = '20px monospace';
-      ctx.fillText(timeStr, 30, h * 0.94);
+      ctx.font = '18px monospace';
+      ctx.fillText(new Date().toISOString() + ' | Frame: ' + frame++, 30, h * 0.94);
 
-      // Resolution & FPS indicators
-      ctx.fillStyle = '#a78bfa';
-      ctx.font = 'bold 18px monospace';
-      ctx.fillText('1280x720 @ 30fps | Loopback Mode', w - 420, h * 0.88);
-      ctx.fillText('Frame: ' + frame++, w - 420, h * 0.94);
-
-      testAnimationId = requestAnimationFrame(drawTestPattern);
+      testAnimationId = requestAnimationFrame(draw);
     }
+    draw();
 
-    drawTestPattern();
+    var stream = testCanvas.captureStream(30);
 
-    // 2. Capture canvas stream
-    var canvasStream = testCanvas.captureStream(30);
-
-    // 3. Create Web Audio test oscillator
-    try {
-      var AudioContext = window.AudioContext || window.webkitAudioContext;
-      if (AudioContext) {
-        testAudioCtx = new AudioContext();
-        var osc = testAudioCtx.createOscillator();
-        var gain = testAudioCtx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(440, testAudioCtx.currentTime); // 440 Hz concert A
-        gain.gain.setValueAtTime(0.01, testAudioCtx.currentTime); // Low volume
-        osc.connect(gain);
-        var dest = testAudioCtx.createMediaStreamDestination();
-        gain.connect(dest);
-        osc.start();
-        dest.stream.getAudioTracks().forEach(function (track) {
-          canvasStream.addTrack(track);
-        });
-      }
-    } catch (e) {
-      log('Web Audio tone init: ' + e.message, 'info');
-    }
-
-    // 4. Setup REAL WebRTC loopback (Local Sender PC -> Local Receiver PC)
     var sender = new RTCPeerConnection();
     var receiver = new RTCPeerConnection();
     loopbackSender = sender;
     pc = receiver;
-    window.__obsWebRTCPeerConnection = pc;
 
-    statPcState.textContent = 'connecting';
-    statIceState.textContent = 'checking';
-    statSignaling.textContent = 'negotiating';
-
-    // Candidate exchange
-    sender.onicecandidate = function (e) {
-      if (e.candidate) receiver.addIceCandidate(e.candidate);
-    };
-    receiver.onicecandidate = function (e) {
-      if (e.candidate) sender.addIceCandidate(e.candidate);
-    };
-
-    receiver.onconnectionstatechange = function () {
-      statPcState.textContent = receiver.connectionState;
-      if (receiver.connectionState === 'connected') {
-        startStatsMonitor();
-      }
-    };
+    sender.onicecandidate = function (e) { if (e.candidate) receiver.addIceCandidate(e.candidate); };
+    receiver.onicecandidate = function (e) { if (e.candidate) sender.addIceCandidate(e.candidate); };
 
     receiver.ontrack = function (e) {
       statTracks.textContent = e.track.kind;
-      if (!video.srcObject) {
-        video.srcObject = e.streams[0] || new MediaStream([e.track]);
-      } else {
-        video.srcObject.addTrack(e.track);
-      }
+      if (!video.srcObject) video.srcObject = e.streams[0] || new MediaStream([e.track]);
+      else video.srcObject.addTrack(e.track);
       video.play().catch(function () {});
       audioVuMeter.classList.remove('hidden');
     };
 
-    // Add canvas tracks to sender
-    canvasStream.getTracks().forEach(function (track) {
-      sender.addTrack(track, canvasStream);
-    });
+    stream.getTracks().forEach(function (t) { sender.addTrack(t, stream); });
 
-    // Negotiate offer / answer
     sender.createOffer()
-      .then(function (offer) {
-        return sender.setLocalDescription(offer);
-      })
+      .then(function (o) { return sender.setLocalDescription(o); })
+      .then(function () { return receiver.setRemoteDescription(sender.localDescription); })
+      .then(function () { return receiver.createAnswer(); })
+      .then(function (a) { return receiver.setLocalDescription(a); })
+      .then(function () { return sender.setRemoteDescription(receiver.localDescription); })
       .then(function () {
-        return receiver.setRemoteDescription(sender.localDescription);
-      })
-      .then(function () {
-        return receiver.createAnswer();
-      })
-      .then(function (answer) {
-        return receiver.setLocalDescription(answer);
-      })
-      .then(function () {
-        return sender.setRemoteDescription(receiver.localDescription);
-      })
-      .then(function () {
-        log('WebRTC Loopback negotiation complete! Test video rendering.', 'info');
         statDimensions.textContent = '1280x720';
         badgeResolution.textContent = '1280x720 @ 30fps';
         badgeResolution.classList.remove('hidden');
-      })
-      .catch(function (err) {
-        log('Test pattern error: ' + err.message, 'error');
+        log('WebRTC Loopback running successfully', 'info');
       });
   }
 
-  // Custom WHEP Connection
-  function connectCustomWhep(url) {
-    if (!url) return;
-    cleanupConnection();
-    log('Connecting to custom WHEP endpoint: ' + url, 'info');
-    connectWhep(url);
-  }
+  btnSwitchTestPattern.addEventListener('click', function () {
+    startTestPattern();
+  });
 
-  // Real-time WebRTC Stats monitor via getStats()
+  // Telemetry getStats
   function startStatsMonitor() {
     if (statsInterval) clearInterval(statsInterval);
-
     statsInterval = setInterval(function () {
       if (!pc) return;
-
       pc.getStats().then(function (stats) {
         var currentBytes = 0;
-        var currentTimestamp = 0;
+        var currentTs = 0;
         var fps = 0;
-        var packetsLost = 0;
-
-        stats.forEach(function (report) {
-          if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.mediaType === 'video')) {
-            currentBytes = report.bytesReceived || 0;
-            currentTimestamp = report.timestamp || Date.now();
-            fps = report.framesPerSecond || (video.videoWidth ? 30 : 0);
-            packetsLost = report.packetsLost || 0;
+        var lost = 0;
+        stats.forEach(function (r) {
+          if (r.type === 'inbound-rtp' && (r.kind === 'video' || r.mediaType === 'video')) {
+            currentBytes = r.bytesReceived || 0;
+            currentTs = r.timestamp || Date.now();
+            fps = r.framesPerSecond || (video.videoWidth ? 30 : 0);
+            lost = r.packetsLost || 0;
           }
         });
-
-        if (prevStatsTimestamp && currentTimestamp > prevStatsTimestamp) {
-          var timeDiffSec = (currentTimestamp - prevStatsTimestamp) / 1000;
-          var bytesDiff = currentBytes - prevBytesReceived;
-          if (bytesDiff > 0 && timeDiffSec > 0) {
-            var kbps = Math.round((bytesDiff * 8) / (timeDiffSec * 1000));
+        if (prevStatsTimestamp && currentTs > prevStatsTimestamp) {
+          var dt = (currentTs - prevStatsTimestamp) / 1000;
+          var db = currentBytes - prevBytesReceived;
+          if (db > 0 && dt > 0) {
+            var kbps = Math.round((db * 8) / (dt * 1000));
             statBitrate.textContent = kbps + ' kbps';
             badgeBitrate.textContent = kbps + ' kbps';
             badgeBitrate.classList.remove('hidden');
           }
         }
-
         prevBytesReceived = currentBytes;
-        prevStatsTimestamp = currentTimestamp;
-
+        prevStatsTimestamp = currentTs;
         if (fps > 0) {
           statFps.textContent = Math.round(fps) + ' fps';
           if (video.videoWidth) {
             badgeResolution.textContent = video.videoWidth + 'x' + video.videoHeight + ' @ ' + Math.round(fps) + 'fps';
           }
         }
-        statPacketloss.textContent = String(packetsLost);
+        statPacketloss.textContent = String(lost);
       }).catch(function () {});
     }, 1000);
   }
 
-  // UI Event Listeners
-
-  // Mode Selection: OBS Live (WHEP)
-  btnModeWhep.addEventListener('click', function () {
-    currentMode = 'whep';
-    btnModeWhep.className = 'px-3 py-1 rounded font-medium transition-colors bg-indigo-600 text-white shadow-sm flex items-center gap-1.5';
-    btnModeTest.className = 'px-3 py-1 rounded font-medium transition-colors text-slate-400 hover:text-slate-200 flex items-center gap-1.5';
-    btnModeCustom.className = 'px-3 py-1 rounded font-medium transition-colors text-slate-400 hover:text-slate-200 flex items-center gap-1.5';
-    badgeSourceMode.textContent = 'WHEP WebRTC';
-    customWhepBar.classList.add('hidden');
-    connectWhep();
-  });
-
-  // Mode Selection: Test Pattern
-  btnModeTest.addEventListener('click', function () {
-    currentMode = 'test';
-    btnModeTest.className = 'px-3 py-1 rounded font-medium transition-colors bg-indigo-600 text-white shadow-sm flex items-center gap-1.5';
-    btnModeWhep.className = 'px-3 py-1 rounded font-medium transition-colors text-slate-400 hover:text-slate-200 flex items-center gap-1.5';
-    btnModeCustom.className = 'px-3 py-1 rounded font-medium transition-colors text-slate-400 hover:text-slate-200 flex items-center gap-1.5';
-    badgeSourceMode.textContent = 'TEST PATTERN';
-    customWhepBar.classList.add('hidden');
-    startTestPattern();
-  });
-
-  // Mode Selection: Custom WHEP
-  btnModeCustom.addEventListener('click', function () {
-    currentMode = 'custom';
-    btnModeCustom.className = 'px-3 py-1 rounded font-medium transition-colors bg-indigo-600 text-white shadow-sm flex items-center gap-1.5';
-    btnModeWhep.className = 'px-3 py-1 rounded font-medium transition-colors text-slate-400 hover:text-slate-200 flex items-center gap-1.5';
-    btnModeTest.className = 'px-3 py-1 rounded font-medium transition-colors text-slate-400 hover:text-slate-200 flex items-center gap-1.5';
-    badgeSourceMode.textContent = 'CUSTOM WHEP';
-    customWhepBar.classList.remove('hidden');
-    inputCustomUrl.focus();
-  });
-
-  btnConnectCustom.addEventListener('click', function () {
-    var url = inputCustomUrl.value.trim();
-    if (url) {
-      connectCustomWhep(url);
-    }
-  });
-
-  btnSwitchTestPattern.addEventListener('click', function () {
-    btnModeTest.click();
-  });
-
-  btnReconnectNow.addEventListener('click', function () {
-    reconnectAttempts = 0;
-    if (currentMode === 'whep') connectWhep();
-    else if (currentMode === 'test') startTestPattern();
-    else if (currentMode === 'custom') connectCustomWhep(inputCustomUrl.value.trim());
-  });
-
-  // Play / Pause toggle
+  // Player Controls
   btnPlayPause.addEventListener('click', function () {
     if (video.paused) {
       video.play().then(function () {
@@ -688,7 +539,6 @@
     }
   });
 
-  // Mute / Unmute toggle
   btnMute.addEventListener('click', function () {
     video.muted = !video.muted;
     if (video.muted) {
@@ -702,7 +552,6 @@
     }
   });
 
-  // Volume slider
   volumeSlider.addEventListener('input', function (e) {
     var val = parseFloat(e.target.value);
     video.volume = val;
@@ -716,37 +565,23 @@
     }
   });
 
-  // Snapshot button
   btnSnapshot.addEventListener('click', function () {
-    if (!video.videoWidth || !video.videoHeight) {
-      log('Snapshot unavailable: video not active', 'warn');
-      return;
-    }
-    var cap = document.createElement('canvas');
-    cap.width = video.videoWidth;
-    cap.height = video.videoHeight;
-    var cctx = cap.getContext('2d');
-    cctx.drawImage(video, 0, 0);
-
-    var link = document.createElement('a');
-    link.download = 'obs-stream-snapshot-' + Date.now() + '.png';
-    link.href = cap.toDataURL('image/png');
-    link.click();
-    log('Snapshot downloaded (' + cap.width + 'x' + cap.height + ')', 'info');
+    if (!video.videoWidth || !video.videoHeight) return;
+    var c = document.createElement('canvas');
+    c.width = video.videoWidth;
+    c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    var a = document.createElement('a');
+    a.download = 'obs-stream-' + Date.now() + '.png';
+    a.href = c.toDataURL('image/png');
+    a.click();
   });
 
-  // Picture in Picture
   btnPip.addEventListener('click', function () {
-    if (document.pictureInPictureElement) {
-      document.exitPictureInPicture();
-    } else if (document.pictureInPictureEnabled && video) {
-      video.requestPictureInPicture().catch(function (e) {
-        log('PiP error: ' + e.message, 'warn');
-      });
-    }
+    if (document.pictureInPictureElement) document.exitPictureInPicture();
+    else if (document.pictureInPictureEnabled && video) video.requestPictureInPicture();
   });
 
-  // Fullscreen
   btnFullscreen.addEventListener('click', function () {
     var wrap = document.getElementById('player-wrap');
     if (!document.fullscreenElement) {
@@ -757,7 +592,6 @@
     }
   });
 
-  // Stats drawer toggle
   btnToggleStats.addEventListener('click', function () {
     sidePanel.classList.toggle('hidden');
   });
@@ -766,28 +600,18 @@
     statusEl.textContent = '';
   });
 
-  // Setup Guide modal
-  btnOpenGuide.addEventListener('click', function () {
-    modalGuide.classList.remove('hidden');
-  });
-
-  btnCloseGuide.addEventListener('click', function () {
-    modalGuide.classList.add('hidden');
-  });
-
-  btnModalGotIt.addEventListener('click', function () {
-    modalGuide.classList.add('hidden');
-  });
-
+  btnOpenGuide.addEventListener('click', function () { modalGuide.classList.remove('hidden'); });
+  btnCloseGuide.addEventListener('click', function () { modalGuide.classList.add('hidden'); });
+  btnModalGotIt.addEventListener('click', function () { modalGuide.classList.add('hidden'); });
   modalGuide.addEventListener('click', function (e) {
     if (e.target === modalGuide) modalGuide.classList.add('hidden');
   });
 
   window.addEventListener('beforeunload', function () {
     isManualDisconnect = true;
-    cleanupConnection();
+    cleanupWebRtc();
   });
 
-  // Start with default WHEP connection
-  connectWhep();
+  // Start with OBS Desktop (VNC) view by default
+  switchTab('vnc');
 })();

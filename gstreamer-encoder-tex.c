@@ -209,16 +209,12 @@ static void gstreamer_tex_encoder_destroy(void *p)
 	g_free(data);
 }
 
-/*
- * Modern encode_texture2 callback:
- * Receives GPU texture directly from OBS without CPU readback.
- */
-static bool gstreamer_tex_encoder_encode2(void *p, struct encoder_texture *texture,
+static bool gstreamer_tex_encoder_encode(void *p, uint32_t handle,
 	int64_t pts, uint64_t lock_key, uint64_t *next_key,
 	struct encoder_packet *packet, bool *received_packet)
 {
 	tex_encoder_data_t *data = (tex_encoder_data_t *)p;
-	if (!data || !texture)
+	if (!data)
 		return false;
 
 	*received_packet = false;
@@ -335,7 +331,7 @@ static struct obs_encoder_info gst_tex_encoder_info_h265 = {
 	.get_name = gstreamer_tex_encoder_get_name_h265,
 	.create = gstreamer_tex_encoder_create_h265,
 	.destroy = gstreamer_tex_encoder_destroy,
-	.encode_texture2 = gstreamer_tex_encoder_encode2,
+	.encode_texture = gstreamer_tex_encoder_encode,
 	.get_defaults = gstreamer_tex_encoder_get_defaults,
 	.get_properties = gstreamer_tex_encoder_get_properties,
 	.get_extra_data = gstreamer_tex_encoder_get_extra_data,
@@ -350,7 +346,7 @@ static struct obs_encoder_info gst_tex_encoder_info_h264 = {
 	.get_name = gstreamer_tex_encoder_get_name_h264,
 	.create = gstreamer_tex_encoder_create_h264,
 	.destroy = gstreamer_tex_encoder_destroy,
-	.encode_texture2 = gstreamer_tex_encoder_encode2,
+	.encode_texture = gstreamer_tex_encoder_encode,
 	.get_defaults = gstreamer_tex_encoder_get_defaults,
 	.get_properties = gstreamer_tex_encoder_get_properties,
 	.get_extra_data = gstreamer_tex_encoder_get_extra_data,

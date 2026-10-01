@@ -175,16 +175,15 @@ static void select_source(gstreamer_output_config &config)
 
 static void stop_output(gstreamer_output_config &config)
 {
-	if (config.encoder) {
-		obs_encoder_stop(config.encoder);
-		obs_encoder_release(config.encoder);
-		config.encoder = nullptr;
-	}
 	if (config.output) {
 		if (obs_output_active(config.output))
 			obs_output_stop(config.output);
 		obs_output_release(config.output);
 		config.output = nullptr;
+	}
+	if (config.encoder) {
+		obs_encoder_release(config.encoder);
+		config.encoder = nullptr;
 	}
 	if (config.view) {
 		obs_view_destroy(config.view);
@@ -451,7 +450,6 @@ static void start_selected(gstreamer_dock_state *state, int row)
 		obs_data_release(enc_settings);
 		if (config.encoder) {
 			obs_output_set_video_encoder(config.output, config.encoder);
-			obs_encoder_start(config.encoder, nullptr, nullptr);
 		}
 	}
 
