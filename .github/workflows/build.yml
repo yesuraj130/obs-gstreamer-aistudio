@@ -1,0 +1,273 @@
+name: Build obs-gstreamer (Multi-Target Separate Outputs)
+
+on:
+  push:
+    branches: [ "**" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  # =========================================================================
+  # Target 1: Legacy OBS 27.2.4 (32-bit x86) for Windows 7 SP1 / Ivy Bridge
+  # =========================================================================
+  build-win32-obs27:
+    name: "Windows 7 / OBS 27 (32-bit x86)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites & MinGW-w64 i686
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-i686 g++-mingw-w64-i686 mingw-w64-tools \
+            ninja-build python3-pip msitools wget unzip pkg-config
+          pip3 install --upgrade meson
+
+      - name: Fetch and prepare OBS Studio 27.2.4 (x86) SDK
+        run: |
+          mkdir -p obs-sdk-win32
+          cd obs-sdk-win32
+          wget -q https://github.com/obsproject/obs-studio/releases/download/27.2.4/OBS-Studio-27.2.4-Full-x86.zip
+          unzip -q OBS-Studio-27.2.4-Full-x86.zip "bin/32bit/*"
+          wget -q https://github.com/obsproject/obs-studio/archive/refs/tags/27.2.4.tar.gz
+          tar -xzf 27.2.4.tar.gz
+          
+          # Generate MinGW import libraries from 32-bit OBS binaries
+          gendef bin/32bit/obs.dll
+          i686-w64-mingw32-dlltool -d obs.def -l libobs.dll.a -D obs.dll
+          gendef bin/32bit/obs-frontend-api.dll
+          i686-w64-mingw32-dlltool -d obs-frontend-api.def -l libobs-frontend-api.dll.a -D obs-frontend-api.dll
+          cd ..
+
+      - name: Fetch and prepare GStreamer 1.18.6 (x86) MinGW SDK
+        run: |
+          mkdir -p gst-sdk-win32
+          cd gst-sdk-win32
+          wget -q https://gstreamer.freedesktop.org/data/pkg/windows/1.18.6/mingw/gstreamer-1.0-devel-mingw-x86-1.18.6.msi
+          msiextract gstreamer-1.0-devel-mingw-x86-1.18.6.msi
+          
+          # Normalize pkg-config paths to current extracted location
+          GST_ROOT="$(pwd)/gstreamer/1.0/mingw_x86"
+          sed -i.bak "s|^prefix=.*|prefix=${GST_ROOT}|g" "${GST_ROOT}/lib/pkgconfig/"*.pc
+          cd ..
+
+      - name: Configure Meson build (32-bit x86, Win7 SP1 target)
+        run: |
+          export PKG_CONFIG_LIBDIR="$(pwd)/gst-sdk-win32/gstreamer/1.0/mingw_x86/lib/pkgconfig"
+          export PKG_CONFIG_PATH="${PKG_CONFIG_LIBDIR}"
+          export C_INCLUDE_PATH="$(pwd)/obs-sdk-win32/obs-studio-27.2.4/libobs:$(pwd)/obs-sdk-win32/obs-studio-27.2.4/UI/obs-frontend-api"
+          export CPLUS_INCLUDE_PATH="${C_INCLUDE_PATH}"
+          export LIBRARY_PATH="$(pwd)/obs-sdk-win32"
+          
+          meson setup build-win32 \
+            --cross-file cross/i686-w64-mingw32.ini \
+            --buildtype release \
+            -Dwebrtc=disabled \
+            -Dc_args="-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 -I$(pwd)/obs-sdk-win32/obs-studio-27.2.4/libobs" \
+            -Dcpp_args="-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 -I$(pwd)/obs-sdk-win32/obs-studio-27.2.4/libobs -I$(pwd)/obs-sdk-win32/obs-studio-27.2.4/UI/obs-frontend-api" \
+            -Dc_link_args="-L$(pwd)/obs-sdk-win32" \
+            -Dcpp_link_args="-L$(pwd)/obs-sdk-win32"
+
+      - name: Compile 32-bit Plugin
+        run: |
+          ninja -C build-win32
+
+      - name: Package OBS 27 (32-bit Win7) Release Archive
+        run: |
+          mkdir -p package-win32/obs-plugins/32bit
+          cp build-win32/obs-gstreamer.dll package-win32/obs-plugins/32bit/
+          
+          cat << 'EOF' > package-win32/README-INSTALL-OBS27-WIN32.txt
+          =============================================================
+          obs-gstreamer for OBS Studio 27.2.4 (32-bit / Windows 7 SP1)
+          Target: x86 (32-bit), Intel Core i3-3217U / Ivy Bridge HD 4000
+          =============================================================
+
+          Prerequisites:
+          1. Windows 7 SP1 with KB4474419 (SHA-2) and Universal CRT (KB2999226).
+          2. Official 32-bit GStreamer Runtime (MinGW version 1.18.6 x86 recommended):
+             https://gstreamer.freedesktop.org/data/pkg/windows/1.18.6/mingw/gstreamer-1.0-mingw-x86-1.18.6.msi
+             * Ensure the GStreamer bin folder (e.g. C:\gstreamer\1.0\mingw_x86\bin) is added to your Windows PATH.
+          3. OBS Studio 27.2.4 (32-bit):
+             https://github.com/obsproject/obs-studio/releases/tag/27.2.4
+
+          Installation:
+          Copy the contents of 'obs-plugins/32bit/obs-gstreamer.dll' into your OBS Studio 32-bit plugin folder:
+          C:\Program Files (x86)\obs-studio\obs-plugins\32bit\obs-gstreamer.dll
+
+          Performance Tips for Intel Core i3-3217U:
+          - Set OBS canvas and output to 1280x720 @ 30 FPS.
+          - Use Intel Quick Sync hardware elements (qsvh264dec / qsvh264enc) for low CPU usage.
+          EOF
+          
+          cd package-win32
+          zip -r ../obs-gstreamer-obs27-win32.zip ./*
+          cd ..
+
+      - name: Upload Win32 (OBS 27) Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-gstreamer-obs27-win32
+          path: obs-gstreamer-obs27-win32.zip
+
+  # =========================================================================
+  # Target 2: Modern OBS Studio 28+/30+ (64-bit x64) for Windows 10/11
+  # =========================================================================
+  build-win64-obs30:
+    name: "Windows 10/11 / OBS 30+ (64-bit x64)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites & MinGW-w64 x86_64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 mingw-w64-tools \
+            ninja-build python3-pip msitools wget unzip pkg-config
+          pip3 install --upgrade meson
+
+      - name: Fetch and prepare OBS Studio 30.2.2 (x64) SDK
+        run: |
+          mkdir -p obs-sdk-win64
+          cd obs-sdk-win64
+          wget -q https://github.com/obsproject/obs-studio/releases/download/30.2.2/OBS-Studio-30.2.2-Windows.zip
+          unzip -q OBS-Studio-30.2.2-Windows.zip "bin/64bit/*"
+          wget -q https://github.com/obsproject/obs-studio/archive/refs/tags/30.2.2.tar.gz
+          tar -xzf 30.2.2.tar.gz
+          
+          # Generate MinGW import libraries from 64-bit OBS binaries
+          gendef bin/64bit/obs.dll
+          x86_64-w64-mingw32-dlltool -d obs.def -l libobs.dll.a -D obs.dll
+          gendef bin/64bit/obs-frontend-api.dll
+          x86_64-w64-mingw32-dlltool -d obs-frontend-api.def -l libobs-frontend-api.dll.a -D obs-frontend-api.dll
+          cd ..
+
+      - name: Fetch and prepare GStreamer 1.22.8 (x64) MinGW SDK
+        run: |
+          mkdir -p gst-sdk-win64
+          cd gst-sdk-win64
+          wget -q https://gstreamer.freedesktop.org/data/pkg/windows/1.22.8/mingw/gstreamer-1.0-devel-mingw-x86_64-1.22.8.msi
+          msiextract gstreamer-1.0-devel-mingw-x86_64-1.22.8.msi
+          
+          # Normalize pkg-config paths to current extracted location
+          GST_ROOT="$(pwd)/gstreamer/1.0/mingw_x86_64"
+          sed -i.bak "s|^prefix=.*|prefix=${GST_ROOT}|g" "${GST_ROOT}/lib/pkgconfig/"*.pc
+          cd ..
+
+      - name: Configure Meson build (64-bit x64, Modern Windows target)
+        run: |
+          export PKG_CONFIG_LIBDIR="$(pwd)/gst-sdk-win64/gstreamer/1.0/mingw_x86_64/lib/pkgconfig"
+          export PKG_CONFIG_PATH="${PKG_CONFIG_LIBDIR}"
+          export C_INCLUDE_PATH="$(pwd)/obs-sdk-win64/obs-studio-30.2.2/libobs:$(pwd)/obs-sdk-win64/obs-studio-30.2.2/UI/obs-frontend-api"
+          export CPLUS_INCLUDE_PATH="${C_INCLUDE_PATH}"
+          export LIBRARY_PATH="$(pwd)/obs-sdk-win64"
+          
+          meson setup build-win64 \
+            --cross-file cross/x86_64-w64-mingw32.ini \
+            --buildtype release \
+            -Dwebrtc=auto \
+            -Dc_args="-I$(pwd)/obs-sdk-win64/obs-studio-30.2.2/libobs" \
+            -Dcpp_args="-I$(pwd)/obs-sdk-win64/obs-studio-30.2.2/libobs -I$(pwd)/obs-sdk-win64/obs-studio-30.2.2/UI/obs-frontend-api" \
+            -Dc_link_args="-L$(pwd)/obs-sdk-win64" \
+            -Dcpp_link_args="-L$(pwd)/obs-sdk-win64"
+
+      - name: Compile 64-bit Plugin
+        run: |
+          ninja -C build-win64
+
+      - name: Package OBS 30 (64-bit Win10/11) Release Archive
+        run: |
+          mkdir -p package-win64/obs-plugins/64bit
+          cp build-win64/obs-gstreamer.dll package-win64/obs-plugins/64bit/
+          
+          cat << 'EOF' > package-win64/README-INSTALL-OBS30-WIN64.txt
+          =============================================================
+          obs-gstreamer for OBS Studio 28+ / 30+ (64-bit / Windows 10/11)
+          Target: x86_64 (64-bit)
+          =============================================================
+
+          Prerequisites:
+          1. Official 64-bit GStreamer Runtime (MinGW 1.22.x or MSVC 1.22+ x64):
+             https://gstreamer.freedesktop.org/data/pkg/windows/
+             * Ensure the GStreamer bin folder (e.g. C:\gstreamer\1.0\msvc_x86_64\bin or mingw_x86_64\bin) is in PATH.
+          2. OBS Studio 28, 29, or 30+ (64-bit).
+
+          Installation:
+          Copy the contents of 'obs-plugins/64bit/obs-gstreamer.dll' into your OBS Studio 64-bit plugin folder:
+          C:\Program Files\obs-studio\obs-plugins\64bit\obs-gstreamer.dll
+          EOF
+          
+          cd package-win64
+          zip -r ../obs-gstreamer-obs30-win64.zip ./*
+          cd ..
+
+      - name: Upload Win64 (OBS 30) Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-gstreamer-obs30-win64
+          path: obs-gstreamer-obs30-win64.zip
+
+  # =========================================================================
+  # Target 3: Linux (x86_64) Native
+  # =========================================================================
+  build-linux:
+    name: "Linux (64-bit x86_64)"
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build python3-pip pkg-config \
+            libobs-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
+            libsoup-3.0-dev qtbase5-dev
+          pip3 install --upgrade meson
+
+      - name: Build with Meson
+        run: |
+          meson setup build-linux --buildtype release
+          ninja -C build-linux
+
+      - name: Package Linux Plugin
+        run: |
+          mkdir -p package-linux/bin/64bit
+          cp build-linux/obs-gstreamer.so package-linux/bin/64bit/
+          tar -czf obs-gstreamer-linux-x86_64.tar.gz -C package-linux .
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-gstreamer-linux-x86_64
+          path: obs-gstreamer-linux-x86_64.tar.gz
+
+  # =========================================================================
+  # Optional: Publish GitHub Release when tagged
+  # =========================================================================
+  release:
+    name: "Publish GitHub Release"
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-win32-obs27, build-win64-obs30, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release and attach separate packages
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            obs-gstreamer-obs27-win32/obs-gstreamer-obs27-win32.zip
+            obs-gstreamer-obs30-win64/obs-gstreamer-obs30-win64.zip
+            obs-gstreamer-linux-x86_64/obs-gstreamer-linux-x86_64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -40,9 +40,46 @@ endif
 qt6 = import('qt6', required : false)
 qt_dep = dependency('qt6', modules : ['Widgets'], required : false)
 if not qt_dep.found()
-  qt5 = import('qt5')
-  qt_dep = dependency('qt5', modules : ['Widgets'])
+  qt5 = import('qt5', required : false)
+  qt_dep = dependency('qt5', modules : ['Widgets'], required : false)
 endif
+
+webrtc_opt = get_option('webrtc')
+webrtc_deps = []
+enable_webrtc = false
+
+if not webrtc_opt.disabled()
+  gst_webrtc_dep = dependency('gstreamer-webrtc-1.0', required : webrtc_opt)
+  gst_sdp_dep = dependency('gstreamer-sdp-1.0', required : webrtc_opt)
+  libsoup_dep = dependency('libsoup-3.0', required : webrtc_opt)
+
+  if gst_webrtc_dep.found() and gst_sdp_dep.found() and libsoup_dep.found()
+    enable_webrtc = true
+    webrtc_deps = [gst_webrtc_dep, gst_sdp_dep, libsoup_dep]
+  endif
+endif
+
+extra_c_args = []
+if enable_webrtc
+  extra_c_args += ['-DENABLE_WEBRTC=1']
+else
+  extra_c_args += ['-DENABLE_WEBRTC=0']
+endif
+
+deps = [
+  obs_dep,
+  obs_frontend_dep,
+  dependency('gstreamer-1.0', version : '>=1.16.0'),
+  dependency('gstreamer-video-1.0'),
+  dependency('gstreamer-audio-1.0'),
+  dependency('gstreamer-app-1.0'),
+  dependency('gstreamer-net-1.0'),
+  dependency('gstreamer-rtsp-server-1.0'),
+]
+if qt_dep.found()
+  deps += qt_dep
+endif
+deps += webrtc_deps
 
 shared_library('obs-gstreamer',
   'gstreamer.c',
@@ -57,22 +94,11 @@ shared_library('obs-gstreamer',
     command : ['git', 'rev-parse', '--short', 'HEAD'],
     input : 'version.c.in',
     output : 'version.c',
+    fallback : 'custom',
   ),
   name_prefix : '',
   name_suffix : name_suffix,
-  dependencies : [
-    obs_dep,
-    obs_frontend_dep,
-    qt_dep,
-    dependency('gstreamer-1.0', version : '>=1.16.0'),
-    dependency('gstreamer-video-1.0'),
-    dependency('gstreamer-audio-1.0'),
-    dependency('gstreamer-app-1.0'),
-    dependency('gstreamer-net-1.0'),
-    dependency('gstreamer-rtsp-server-1.0'),
-    dependency('gstreamer-webrtc-1.0'),
-    dependency('gstreamer-sdp-1.0'),
-    dependency('libsoup-3.0'),
-  ],
+  c_args : extra_c_args,
+  dependencies : deps,
   install : true,
 )

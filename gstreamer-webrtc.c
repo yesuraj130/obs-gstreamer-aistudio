@@ -19,13 +19,19 @@
  */
 
 #include "gstreamer-webrtc.h"
+#include <plugin-support.h>
+
+#ifndef ENABLE_WEBRTC
+#define ENABLE_WEBRTC 1
+#endif
+
+#if ENABLE_WEBRTC
 
 #include <gst/app/app.h>
 #include <gst/sdp/sdp.h>
 #include <gst/video/video.h>
 #include <gst/webrtc/webrtc.h>
 #include <libsoup/soup.h>
-#include <plugin-support.h>
 
 #define MAX_SESSIONS 16
 #define ANSWER_TIMEOUT_SECONDS 5
@@ -958,3 +964,33 @@ GstElement *gstreamer_webrtc_appsrc(struct gstreamer_webrtc *webrtc)
 {
 	return webrtc ? webrtc->appsrc : NULL;
 }
+
+#else /* !ENABLE_WEBRTC */
+
+#include <glib.h>
+
+struct gstreamer_webrtc *gstreamer_webrtc_create(obs_output_t *output, obs_data_t *settings,
+						 struct obs_video_info *ovi, char **error)
+{
+	(void)output;
+	(void)settings;
+	(void)ovi;
+	blog(LOG_WARNING, "[obs-gstreamer] WebRTC WHEP output is disabled in this build");
+	if (error)
+		*error = g_strdup("WebRTC output is not supported in this build (compiled without libsoup-3.0 / WebRTC)");
+	return NULL;
+}
+
+void gstreamer_webrtc_destroy(struct gstreamer_webrtc *webrtc)
+{
+	(void)webrtc;
+}
+
+GstElement *gstreamer_webrtc_appsrc(struct gstreamer_webrtc *webrtc)
+{
+	(void)webrtc;
+	return NULL;
+}
+
+#endif /* ENABLE_WEBRTC */
+
