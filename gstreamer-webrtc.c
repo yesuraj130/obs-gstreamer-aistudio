@@ -54,8 +54,11 @@ static GstPadProbeReturn rtp_packet_probe(GstPad *pad, GstPadProbeInfo *info,
 	return GST_PAD_PROBE_OK;
 }
 
+struct gstreamer_webrtc;
+
 typedef struct {
 	char *id;
+	struct gstreamer_webrtc *webrtc;
 	GstElement *queue;
 	GstElement *webrtcbin;
 	GstPad *tee_pad;
@@ -85,6 +88,34 @@ struct gstreamer_webrtc {
 	guint bus_watch_id;
 	packet_counter_t pay_counter;
 };
+
+#ifndef SOUP_CHECK_VERSION
+#define SOUP_CHECK_VERSION(major, minor, micro) \
+    (SOUP_MAJOR_VERSION > (major) || \
+     (SOUP_MAJOR_VERSION == (major) && SOUP_MINOR_VERSION > (minor)) || \
+     (SOUP_MAJOR_VERSION == (major) && SOUP_MINOR_VERSION == (minor) && \
+      SOUP_MICRO_VERSION >= (micro)))
+#endif
+
+static inline void compat_soup_server_message_pause(SoupServer *server, SoupServerMessage *msg)
+{
+#if SOUP_CHECK_VERSION(3, 2, 0)
+	(void)server;
+	soup_server_message_pause(msg);
+#else
+	soup_server_pause_message(server, msg);
+#endif
+}
+
+static inline void compat_soup_server_message_unpause(SoupServer *server, SoupServerMessage *msg)
+{
+#if SOUP_CHECK_VERSION(3, 2, 0)
+	(void)server;
+	soup_server_message_unpause(msg);
+#else
+	soup_server_unpause_message(server, msg);
+#endif
+}
 
 // ---------------------------------------------------------------------------
 // Embedded default viewer assets (seeded into the user-editable web root)
@@ -245,7 +276,7 @@ static void session_free(gpointer data)
 	}
 	if (session->webrtcbin && session->pending_msg) {
 		soup_server_message_set_status(session->pending_msg, SOUP_STATUS_INTERNAL_SERVER_ERROR, NULL);
-		soup_server_message_unpause(session->pending_msg);
+		compat_soup_server_message_unpause(session->webrtc ? session->webrtc->server : NULL, session->pending_msg);
 		session->pending_msg = NULL;
 	}
 	g_free(session->id);
@@ -362,7 +393,7 @@ static gboolean idle_reply(gpointer user_data)
 	soup_server_message_set_status(ctx->msg, ctx->status, NULL);
 	soup_server_message_set_response(ctx->msg, "application/sdp", SOUP_MEMORY_COPY,
 		ctx->sdp ? ctx->sdp : "", ctx->sdp ? strlen(ctx->sdp) : 0);
-	soup_server_message_unpause(ctx->msg);
+	compat_soup_server_message_unpause(ctx->webrtc ? ctx->webrtc->server : NULL, ctx->msg);
 	g_object_unref(ctx->msg);
 	if (ctx->status != SOUP_STATUS_CREATED)
 		session_teardown_async(ctx->webrtc, ctx->id);
@@ -390,7 +421,7 @@ static gboolean answer_timeout(gpointer user_data)
 			ctx->id);
 		soup_server_message_set_status(session->pending_msg,
 			SOUP_STATUS_INTERNAL_SERVER_ERROR, NULL);
-		soup_server_message_unpause(session->pending_msg);
+		compat_soup_server_message_unpause(ctx->webrtc ? ctx->webrtc->server : NULL, session->pending_msg);
 		session->pending_msg = NULL;
 	}
 	if (session)
@@ -539,6 +570,7 @@ static void whep_post(struct gstreamer_webrtc *webrtc, SoupServerMessage *msg)
 	}
 
 	whep_session_t *session = g_new0(whep_session_t, 1);
+	session->webrtc = webrtc;
 	session->id = g_strdup_printf("viewer%u", ++webrtc->session_counter);
 
 	session->queue = gst_element_factory_make("queue", NULL);
@@ -642,7 +674,7 @@ static void whep_post(struct gstreamer_webrtc *webrtc, SoupServerMessage *msg)
 	tctx->webrtc = webrtc;
 	tctx->id = g_strdup(session->id);
 	session->timeout_id = g_timeout_add_seconds(ANSWER_TIMEOUT_SECONDS, answer_timeout, tctx);
-	soup_server_message_pause(msg);
+	compat_soup_server_message_pause(webrtc->server, msg);
 
 	GstPromise *promise = gst_promise_new_with_change_func(on_remote_description_set, ctx, NULL);
 	g_signal_emit_by_name(session->webrtcbin, "set-remote-description", offer, promise);
