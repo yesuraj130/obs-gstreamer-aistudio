@@ -18,8 +18,10 @@
  * along with obs-gstreamer. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#ifdef _MSC_VER
 #pragma warning(disable : 4047)
 #pragma warning(disable : 4244)
+#endif
 
 #include <obs-module.h>
 #include <gst/gst.h>
@@ -314,9 +316,9 @@ bool gstreamer_output_start(void *p)
 	data->buffer_size = obs_video_format_buffer_size(data->ovi.output_format,
 		data->ovi.output_width, data->ovi.output_height);
 	if (data->webrtc_output)
-		blog(LOG_INFO, "[obs-gstreamer] WebRTC video format=%d (%s), size=%dx%d, frame bytes=%zu",
+		blog(LOG_INFO, "[obs-gstreamer] WebRTC video format=%d (%s), size=%dx%d, frame bytes=%llu",
 			data->ovi.output_format, gst_format, data->ovi.output_width,
-			data->ovi.output_height, data->buffer_size);
+			data->ovi.output_height, (unsigned long long)data->buffer_size);
 
 	if (data->rtsp_server) {
 		const char *mount = obs_data_get_string(data->settings, "rtsp_mount");
@@ -551,8 +553,8 @@ void gstreamer_output_raw_video(void *p, struct video_data *frame)
 
 	GstFlowReturn result = gst_app_src_push_buffer(GST_APP_SRC(video), buffer);
 	if (data->webrtc_output && (data->raw_video_frames == 1 || data->raw_video_frames % 60 == 0))
-		blog(LOG_INFO, "[obs-gstreamer] WebRTC raw frame %llu pushed, result=%s, size=%zu",
-			(unsigned long long)data->raw_video_frames, gst_flow_get_name(result), data->buffer_size);
+		blog(LOG_INFO, "[obs-gstreamer] WebRTC raw frame %llu pushed, result=%s, size=%llu",
+			(unsigned long long)data->raw_video_frames, gst_flow_get_name(result), (unsigned long long)data->buffer_size);
 	if (result != GST_FLOW_OK && result != GST_FLOW_FLUSHING)
 		blog(LOG_WARNING, "[obs-gstreamer] RTSP appsrc push failed: %s", gst_flow_get_name(result));
 
@@ -667,5 +669,7 @@ obs_properties_t *gstreamer_output_get_properties(void *data)
 	obs_property_set_description(prop, "Pipeline");
 	return props;
 }
+#ifdef _MSC_VER
 #pragma warning(default : 4047)
 #pragma warning(default : 4244)
+#endif

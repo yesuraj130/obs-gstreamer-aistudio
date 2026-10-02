@@ -8,7 +8,6 @@
 #include "gstreamer-render-hub.h"
 
 #include <obs-module.h>
-#include <util/threading.h>
 #include <util/darray.h>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
@@ -30,7 +29,7 @@ struct gst_hub_branch {
 	GstRTSPMediaFactory *factory;
 	GstElement *appsrc;
 	GstRTSPMedia *media;
-	pthread_mutex_t lock;
+	GMutex lock;
 	bool active;
 	int client_count;
 	struct gst_master_hub *hub;
@@ -58,11 +57,11 @@ struct gst_master_hub {
 	GstElement *pipe;
 	GstElement *appsrc;
 	GstElement *appsink;
-	pthread_t worker_thread;
+	GThread *worker_thread;
 	bool worker_running;
 
 	gint connected_client_count; // Number of active remote RTSP clients across all branches
-	pthread_mutex_t branch_lock;
+	GMutex branch_lock;
 	struct gst_hub_branch *branches;
 	size_t active_branch_count;
 	bool render_hook_active;
@@ -70,11 +69,11 @@ struct gst_master_hub {
 
 // Global singleton hub for the active video canvas
 static struct gst_master_hub *g_hub = NULL;
-static pthread_mutex_t g_hub_mutex = PTHREAD_MUTEX_INITIALIZER;
+static GMutex g_hub_mutex;
 
 // Forward declarations
 static void hub_render_callback(void *param, uint32_t cx, uint32_t cy);
-static void *hub_worker_loop(void *arg);
+static gpointer hub_worker_loop(gpointer arg);
 static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media, gpointer user_data);
 static void media_unprepared_cb(GstRTSPMedia *media, gpointer user_data);
 
@@ -210,7 +209,7 @@ static void hub_render_callback(void *param, uint32_t cx, uint32_t cy)
 	if (hub->first_frame_primed && hub->stagesurf[prev] && hub->appsrc) {
 		uint8_t *data = NULL;
 		uint32_t linesize = 0;
-		if (gs_stagesurf_map(hub->stagesurf[prev], &data, &linesize)) {
+		if (gs_stagesurface_map(hub->stagesurf[prev], &data, &linesize)) {
 			size_t frame_bytes = (size_t)hub->width * (size_t)hub->height * 4;
 			GstBuffer *buf = gst_buffer_new_allocate(NULL, frame_bytes, NULL);
 			if (buf) {
@@ -232,7 +231,7 @@ static void hub_render_callback(void *param, uint32_t cx, uint32_t cy)
 					gst_buffer_unref(buf);
 				}
 			}
-			gs_stagesurf_unmap(hub->stagesurf[prev]);
+			gs_stagesurface_unmap(hub->stagesurf[prev]);
 		}
 	} else {
 		hub->first_frame_primed = true;
@@ -243,7 +242,7 @@ static void hub_render_callback(void *param, uint32_t cx, uint32_t cy)
 }
 
 /* Worker loop pulling compressed H.264 packets from appsink and pushing to RTSP branches */
-static void *hub_worker_loop(void *arg)
+static gpointer hub_worker_loop(gpointer arg)
 {
 	struct gst_master_hub *hub = (struct gst_master_hub *)arg;
 
@@ -253,18 +252,18 @@ static void *hub_worker_loop(void *arg)
 
 		GstBuffer *buf = gst_sample_get_buffer(sample);
 		if (buf) {
-			pthread_mutex_lock(&hub->branch_lock);
+			g_mutex_lock(&hub->branch_lock);
 			struct gst_hub_branch *curr = hub->branches;
 			while (curr) {
-				pthread_mutex_lock(&curr->lock);
+				g_mutex_lock(&curr->lock);
 				if (curr->active && curr->appsrc) {
 					// Push a copy/ref to this RTSP client's pipeline
 					gst_app_src_push_buffer(GST_APP_SRC(curr->appsrc), gst_buffer_ref(buf));
 				}
-				pthread_mutex_unlock(&curr->lock);
+				g_mutex_unlock(&curr->lock);
 				curr = curr->next;
 			}
-			pthread_mutex_unlock(&hub->branch_lock);
+			g_mutex_unlock(&hub->branch_lock);
 		}
 
 		gst_sample_unref(sample);
@@ -290,7 +289,7 @@ static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media
 	gst_app_src_set_stream_type(GST_APP_SRC(appsrc), GST_APP_STREAM_TYPE_STREAM);
 	gst_app_src_set_latency(GST_APP_SRC(appsrc), 0, 0);
 
-	pthread_mutex_lock(&branch->lock);
+	g_mutex_lock(&branch->lock);
 	if (branch->appsrc) {
 		gst_object_unref(branch->appsrc);
 	}
@@ -306,7 +305,7 @@ static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media
 		branch->media = GST_RTSP_MEDIA(gst_object_ref(media));
 		g_signal_connect(media, "unprepared", G_CALLBACK(media_unprepared_cb), branch);
 	}
-	pthread_mutex_unlock(&branch->lock);
+	g_mutex_unlock(&branch->lock);
 
 	if (branch->hub) {
 		int prev = g_atomic_int_add(&branch->hub->connected_client_count, 1);
@@ -328,7 +327,7 @@ static void media_unprepared_cb(GstRTSPMedia *media, gpointer user_data)
 {
 	(void)media;
 	struct gst_hub_branch *branch = (struct gst_hub_branch *)user_data;
-	pthread_mutex_lock(&branch->lock);
+	g_mutex_lock(&branch->lock);
 	if (branch->client_count > 0) {
 		branch->client_count--;
 	}
@@ -343,7 +342,7 @@ static void media_unprepared_cb(GstRTSPMedia *media, gpointer user_data)
 			branch->media = NULL;
 		}
 	}
-	pthread_mutex_unlock(&branch->lock);
+	g_mutex_unlock(&branch->lock);
 
 	if (branch->hub) {
 		int remaining = g_atomic_int_add(&branch->hub->connected_client_count, -1) - 1;
@@ -384,7 +383,7 @@ static bool hub_init(struct gst_master_hub *hub, const gst_hub_output_params_t *
 	if (strcmp(hub->source_type, "Scene") == 0) {
 		obs_scene_t *sc = obs_get_scene_by_name(hub->source_name);
 		hub->source = sc ? obs_scene_get_source(sc) : NULL;
-		if (hub->source) obs_source_addref(hub->source);
+		if (hub->source) obs_source_get_ref(hub->source);
 		if (sc) obs_scene_release(sc);
 	} else if (strcmp(hub->source_type, "Source") == 0) {
 		hub->source = obs_get_source_by_name(hub->source_name);
@@ -428,7 +427,7 @@ static bool hub_init(struct gst_master_hub *hub, const gst_hub_output_params_t *
 
 	// Start worker thread
 	hub->worker_running = true;
-	pthread_create(&hub->worker_thread, NULL, hub_worker_loop, hub);
+	hub->worker_thread = g_thread_new("gst_hub_worker", hub_worker_loop, hub);
 
 	// Hook into OBS GPU render thread
 	obs_add_main_render_callback(hub_render_callback, hub);
@@ -451,7 +450,10 @@ static void hub_destroy(struct gst_master_hub *hub)
 	}
 
 	hub->worker_running = false;
-	pthread_join(hub->worker_thread, NULL);
+	if (hub->worker_thread) {
+		g_thread_join(hub->worker_thread);
+		hub->worker_thread = NULL;
+	}
 
 	if (hub->pipe) {
 		gst_element_set_state(hub->pipe, GST_STATE_NULL);
@@ -485,7 +487,7 @@ static void hub_destroy(struct gst_master_hub *hub)
 
 	bfree(hub->source_type);
 	bfree(hub->source_name);
-	pthread_mutex_destroy(&hub->branch_lock);
+	g_mutex_clear(&hub->branch_lock);
 	bfree(hub);
 
 	blog(LOG_INFO, "[obs-gstreamer-hub] Master GPU Render Hub destroyed cleanly");
@@ -496,16 +498,16 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 {
 	if (!params) return NULL;
 
-	pthread_mutex_lock(&g_hub_mutex);
+	g_mutex_lock(&g_hub_mutex);
 
 	// Ensure master hub is running
 	if (!g_hub) {
 		g_hub = bzalloc(sizeof(struct gst_master_hub));
-		pthread_mutex_init(&g_hub->branch_lock, NULL);
+		g_mutex_init(&g_hub->branch_lock);
 		if (!hub_init(g_hub, params)) {
 			hub_destroy(g_hub);
 			g_hub = NULL;
-			pthread_mutex_unlock(&g_hub_mutex);
+			g_mutex_unlock(&g_hub_mutex);
 			return NULL;
 		}
 	}
@@ -514,19 +516,19 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 
 	// Port Conflict Detection: Check if any active branch is already using this RTSP port
 	if (g_hub) {
-		pthread_mutex_lock(&g_hub->branch_lock);
+		g_mutex_lock(&g_hub->branch_lock);
 		struct gst_hub_branch *existing = g_hub->branches;
 		while (existing) {
 			if (existing->active && existing->service && strcmp(existing->service, requested_service) == 0) {
 				blog(LOG_ERROR, "[obs-gstreamer-hub] Cannot start RTSP branch '%s': Port %s is already in use by active branch '%s'!",
 					params->name ? params->name : "Output", requested_service, existing->name ? existing->name : "Unknown");
-				pthread_mutex_unlock(&g_hub->branch_lock);
-				pthread_mutex_unlock(&g_hub_mutex);
+				g_mutex_unlock(&g_hub->branch_lock);
+				g_mutex_unlock(&g_hub_mutex);
 				return NULL;
 			}
 			existing = existing->next;
 		}
-		pthread_mutex_unlock(&g_hub->branch_lock);
+		g_mutex_unlock(&g_hub->branch_lock);
 	}
 
 	// Create new RTSP branch
@@ -535,7 +537,7 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 	branch->service = bstrdup(requested_service);
 	branch->mount_point = bstrdup(params->rtsp_mount && params->rtsp_mount[0] ? params->rtsp_mount : "/live");
 	branch->hub = g_hub;
-	pthread_mutex_init(&branch->lock, NULL);
+	g_mutex_init(&branch->lock);
 
 	// Setup GStreamer RTSP Server for this branch
 	branch->server = gst_rtsp_server_new();
@@ -571,24 +573,24 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 		bfree(branch->name);
 		bfree(branch->service);
 		bfree(branch->mount_point);
-		pthread_mutex_destroy(&branch->lock);
+		g_mutex_clear(&branch->lock);
 		bfree(branch);
-		pthread_mutex_unlock(&g_hub_mutex);
+		g_mutex_unlock(&g_hub_mutex);
 		return NULL;
 	}
 
 	branch->active = true;
 
 	// Link branch into hub
-	pthread_mutex_lock(&g_hub->branch_lock);
+	g_mutex_lock(&g_hub->branch_lock);
 	branch->next = g_hub->branches;
 	g_hub->branches = branch;
 	g_hub->active_branch_count++;
-	pthread_mutex_unlock(&g_hub->branch_lock);
+	g_mutex_unlock(&g_hub->branch_lock);
 
 	blog(LOG_INFO, "[obs-gstreamer-hub] Branch started: rtsp://127.0.0.1:%s%s", branch->service, branch->mount_point);
 
-	pthread_mutex_unlock(&g_hub_mutex);
+	g_mutex_unlock(&g_hub_mutex);
 	return branch;
 }
 
@@ -599,7 +601,7 @@ static void gst_render_hub_stop_branch_internal(gst_hub_branch_t *branch)
 
 	struct gst_master_hub *hub = branch->hub;
 	if (hub) {
-		pthread_mutex_lock(&hub->branch_lock);
+		g_mutex_lock(&hub->branch_lock);
 		struct gst_hub_branch **curr = &hub->branches;
 		while (*curr) {
 			if (*curr == branch) {
@@ -609,10 +611,10 @@ static void gst_render_hub_stop_branch_internal(gst_hub_branch_t *branch)
 			}
 			curr = &(*curr)->next;
 		}
-		pthread_mutex_unlock(&hub->branch_lock);
+		g_mutex_unlock(&hub->branch_lock);
 	}
 
-	pthread_mutex_lock(&branch->lock);
+	g_mutex_lock(&branch->lock);
 	branch->active = false;
 	int branch_clients = branch->client_count;
 	branch->client_count = 0;
@@ -646,7 +648,7 @@ static void gst_render_hub_stop_branch_internal(gst_hub_branch_t *branch)
 		gst_object_unref(branch->server);
 		branch->server = NULL;
 	}
-	pthread_mutex_unlock(&branch->lock);
+	g_mutex_unlock(&branch->lock);
 
 	if (hub && branch_clients > 0) {
 		int remaining = g_atomic_int_add(&hub->connected_client_count, -branch_clients) - branch_clients;
@@ -662,7 +664,7 @@ static void gst_render_hub_stop_branch_internal(gst_hub_branch_t *branch)
 	bfree(branch->name);
 	bfree(branch->service);
 	bfree(branch->mount_point);
-	pthread_mutex_destroy(&branch->lock);
+	g_mutex_clear(&branch->lock);
 	bfree(branch);
 
 	// If no more branches remain on the hub, cleanly destroy the master hub
@@ -677,9 +679,9 @@ void gst_render_hub_stop_branch(gst_hub_branch_t *branch)
 {
 	if (!branch) return;
 
-	pthread_mutex_lock(&g_hub_mutex);
+	g_mutex_lock(&g_hub_mutex);
 	gst_render_hub_stop_branch_internal(branch);
-	pthread_mutex_unlock(&g_hub_mutex);
+	g_mutex_unlock(&g_hub_mutex);
 }
 
 /* Public API: Check if branch is active */
@@ -691,11 +693,11 @@ bool gst_render_hub_is_branch_active(const gst_hub_branch_t *branch)
 /* Public API: Global shutdown */
 void gst_render_hub_shutdown(void)
 {
-	pthread_mutex_lock(&g_hub_mutex);
+	g_mutex_lock(&g_hub_mutex);
 	if (g_hub) {
 		while (g_hub->branches) {
 			gst_render_hub_stop_branch_internal(g_hub->branches);
 		}
 	}
-	pthread_mutex_unlock(&g_hub_mutex);
+	g_mutex_unlock(&g_hub_mutex);
 }
