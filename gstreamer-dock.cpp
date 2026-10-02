@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMessageBox>
 #include <QStringList>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -245,6 +246,9 @@ static void stop_output(gstreamer_output_config &config)
 		config.encoder = nullptr;
 	}
 	if (config.view) {
+#if defined(LIBOBS_API_VER) && LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(28, 0, 0)
+		obs_view_remove(config.view);
+#endif
 		obs_view_destroy(config.view);
 		config.view = nullptr;
 		config.video = nullptr;
@@ -523,10 +527,82 @@ static void refresh_rows(gstreamer_dock_state *state)
 	state->remove->setEnabled(!cur_running);
 }
 
+static void update_row_states(gstreamer_dock_state *state)
+{
+	if (state->outputs->count() != static_cast<int>(state->configurations.size())) {
+		refresh_rows(state);
+		return;
+	}
+
+	for (size_t index = 0; index < state->configurations.size(); ++index) {
+		const auto &config = state->configurations[index];
+		const bool running = is_config_active(config);
+		const QString status = running ? "Running" : "Stopped";
+
+		QListWidgetItem *item = state->outputs->item(static_cast<int>(index));
+		if (!item) continue;
+		QWidget *row_widget = state->outputs->itemWidget(item);
+		if (!row_widget) continue;
+
+		QLabel *label = row_widget->findChild<QLabel *>();
+		auto buttons = row_widget->findChildren<QPushButton *>();
+
+		QString label_text;
+		if (config.use_render_hub) {
+			label_text = QString("%1 [Direct GPU Hub: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status);
+		} else if (config.use_gpu_encoder) {
+			label_text = QString("%1 [GPU: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status);
+		} else {
+			label_text = QString("%1  [%2]").arg(config.name, status);
+		}
+
+		if (label && label->text() != label_text) {
+			label->setText(label_text);
+		}
+
+		if (buttons.size() >= 2) {
+			QPushButton *start_btn = buttons[0];
+			QPushButton *stop_btn = buttons[1];
+			if (start_btn->isEnabled() == running) start_btn->setEnabled(!running);
+			if (stop_btn->isEnabled() != running) stop_btn->setEnabled(running);
+		}
+	}
+
+	const int cur = state->outputs->currentRow();
+	const bool cur_running = (cur >= 0 && cur < static_cast<int>(state->configurations.size())) ?
+		is_config_active(state->configurations[cur]) : false;
+	state->edit->setEnabled(!cur_running);
+	state->remove->setEnabled(!cur_running);
+}
+
 static void start_selected(gstreamer_dock_state *state, int row)
 {
 	if (row < 0 || row >= static_cast<int>(state->configurations.size())) return;
 	gstreamer_output_config &config = state->configurations[row];
+
+	// Port Conflict Detection: If starting an RTSP server, check if port is already taken by another active output
+	const bool is_rtsp = config.use_render_hub || (config.mode == "RTSP");
+	if (is_rtsp) {
+		const QString target_port = config.rtsp_service.trimmed();
+		for (size_t i = 0; i < state->configurations.size(); ++i) {
+			if (static_cast<int>(i) == row) continue;
+			const auto &other = state->configurations[i];
+			if (is_config_active(other)) {
+				const bool other_is_rtsp = other.use_render_hub || (other.mode == "RTSP");
+				if (other_is_rtsp && other.rtsp_service.trimmed() == target_port) {
+					QMessageBox::critical(
+						state->widget,
+						"RTSP Port Conflict",
+						QString("Cannot start '%1': Port %2 is already in use by active output '%3'.\n\n"
+						        "Starting a second RTSP server on the same port is not allowed. "
+						        "Please configure a different port before starting this output.")
+							.arg(config.name, target_port, other.name));
+					return;
+				}
+			}
+		}
+	}
+
 	stop_output(config);
 
 	if (config.use_render_hub) {
@@ -543,6 +619,14 @@ static void start_selected(gstreamer_dock_state *state, int row)
 		params.rtsp_pipeline = config.rtsp_pipeline.toUtf8().constData();
 
 		config.hub_branch = gst_render_hub_start_branch(&params);
+		if (!config.hub_branch) {
+			QMessageBox::critical(
+				state->widget,
+				"Failed to Start RTSP Server",
+				QString("Could not start Direct GPU RTSP server for '%1' on port %2.\n\n"
+				        "The port may already be in use by another application or server.")
+					.arg(config.name, config.rtsp_service));
+		}
 		refresh_rows(state);
 		save_configurations(state);
 		return;
@@ -568,7 +652,15 @@ static void start_selected(gstreamer_dock_state *state, int row)
 		}
 	}
 
-	if (!obs_output_start(config.output)) stop_output(config);
+	if (!obs_output_start(config.output)) {
+		const char *err = obs_output_get_last_error(config.output);
+		stop_output(config);
+		QMessageBox::critical(
+			state->widget,
+			"Failed to Start Output",
+			QString("Failed to start output '%1': %2")
+				.arg(config.name, (err && *err) ? QString::fromUtf8(err) : "Port already in use or pipeline initialization failed."));
+	}
 	refresh_rows(state);
 	save_configurations(state);
 }
@@ -681,9 +773,19 @@ static QWidget *create_gstreamer_dock_widget(void)
 	if (state->configurations.empty())
 		state->configurations.emplace_back();
 	refresh_rows(state);
-	QTimer::singleShot(0, widget, [state]() {
+	obs_frontend_add_event_callback([](enum obs_frontend_event event, void *private_data) {
+		if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+			auto *st = static_cast<gstreamer_dock_state *>(private_data);
+			for (int index = 0; index < static_cast<int>(st->configurations.size()); ++index) {
+				if (st->configurations[index].auto_start && !is_config_active(st->configurations[index])) {
+					start_selected(st, index);
+				}
+			}
+		}
+	}, state);
+	QTimer::singleShot(200, widget, [state]() {
 		for (int index = 0; index < static_cast<int>(state->configurations.size()); ++index) {
-			if (state->configurations[index].auto_start)
+			if (state->configurations[index].auto_start && !is_config_active(state->configurations[index]))
 				start_selected(state, index);
 		}
 	});
@@ -762,7 +864,7 @@ static QWidget *create_gstreamer_dock_widget(void)
 		QAction *edit = menu.addAction("Edit...");
 		QAction *remove = menu.addAction("Remove");
 		const int row = state->outputs->row(item);
-		const bool running = state->configurations[row].output && obs_output_active(state->configurations[row].output);
+		const bool running = is_config_active(state->configurations[row]);
 		start->setEnabled(!running);
 		stop->setEnabled(running);
 		remove->setEnabled(!running);
@@ -778,7 +880,7 @@ static QWidget *create_gstreamer_dock_widget(void)
 	});
 	QTimer *timer = new QTimer(widget);
 	QObject::connect(timer, &QTimer::timeout, [state]() {
-		refresh_rows(state);
+		update_row_states(state);
 	});
 	timer->setInterval(1000);
 	timer->start();

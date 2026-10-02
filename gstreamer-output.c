@@ -292,10 +292,15 @@ bool gstreamer_output_start(void *p)
 		const char *mount = obs_data_get_string(data->settings, "rtsp_mount");
 		const char *service = obs_data_get_string(data->settings, "rtsp_service");
 		const char *pipeline = obs_data_get_string(data->settings, "rtsp_pipeline");
-		char *launch = g_strdup_printf(
-			pipeline && pipeline[0] ? pipeline : "( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true block=true ! queue ! video/x-raw, format=%s, width=%d, height=%d, framerate=%d/%d ! videoconvert ! x264enc tune=zerolatency speed-preset=veryfast bitrate=3000 key-int-max=30 ! video/x-h264, stream-format=byte-stream, alignment=au ! h264parse ! rtph264pay name=pay0 pt=96 )",
-			gst_format, data->ovi.output_width, data->ovi.output_height,
-			data->ovi.fps_num, data->ovi.fps_den);
+		const char *default_pipe = "( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true block=true ! queue ! video/x-raw, format=%s, width=%d, height=%d, framerate=%d/%d ! videoconvert ! x264enc tune=zerolatency speed-preset=veryfast bitrate=3000 key-int-max=30 ! video/x-h264, stream-format=byte-stream, alignment=au ! h264parse ! rtph264pay name=pay0 pt=96 )";
+		const char *chosen_pipe = (pipeline && pipeline[0]) ? pipeline : default_pipe;
+		char *launch = NULL;
+		if (strstr(chosen_pipe, "%s")) {
+			launch = g_strdup_printf(chosen_pipe, gst_format, data->ovi.output_width, data->ovi.output_height,
+				data->ovi.fps_num, data->ovi.fps_den);
+		} else {
+			launch = g_strdup(chosen_pipe);
+		}
 
 		data->server = gst_rtsp_server_new();
 		if (service && service[0])
@@ -308,7 +313,12 @@ bool gstreamer_output_start(void *p)
 		g_signal_connect(data->server, "client-connected", G_CALLBACK(client_connected_cb), data);
 		g_signal_connect(data->factory, "media-configure", G_CALLBACK(media_configure_cb), data);
 		gst_rtsp_mount_points_add_factory(data->mounts, data->mount_point, data->factory);
-		gst_rtsp_server_attach(data->server, NULL);
+		if (gst_rtsp_server_attach(data->server, NULL) == 0) {
+			blog(LOG_ERROR, "[obs-gstreamer] Failed to attach RTSP server on port %s: address already in use", service && service[0] ? service : "8554");
+			obs_output_set_last_error(data->output, "Failed to start RTSP server: port already in use or bind failed");
+			g_free(launch);
+			return false;
+		}
 		gst_rtsp_server_set_service(data->server, service);
 		g_free(launch);
 		blog(LOG_INFO, "[obs-gstreamer] RTSP server started at rtsp://127.0.0.1:%s%s", gst_rtsp_server_get_service(data->server), data->mount_point);

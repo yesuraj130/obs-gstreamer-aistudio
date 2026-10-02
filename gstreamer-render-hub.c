@@ -24,6 +24,7 @@ struct gst_hub_branch {
 	char *name;
 	char *service;
 	char *mount_point;
+	guint source_id;
 	GstRTSPServer *server;
 	GstRTSPMountPoints *mounts;
 	GstRTSPMediaFactory *factory;
@@ -88,8 +89,25 @@ static GstElement *create_master_encoder_pipeline(struct gst_master_hub *hub,
 	if (custom_master_pipe && custom_master_pipe[0]) {
 		// User provided custom master pipeline
 		if (strstr(custom_master_pipe, "appsrc") && strstr(custom_master_pipe, "appsink")) {
-			if (strstr(custom_master_pipe, "%u")) {
+			// Safely count %u specifiers and check for invalid/unexpected specifiers
+			int u_count = 0;
+			bool has_invalid = false;
+			const char *p = custom_master_pipe;
+			while ((p = strchr(p, '%')) != NULL) {
+				if (*(p + 1) == 'u') {
+					u_count++;
+					p += 2;
+				} else if (*(p + 1) == '%') {
+					p += 2;
+				} else {
+					has_invalid = true;
+					break;
+				}
+			}
+			if (!has_invalid && u_count == 4) {
 				pipe_desc = g_strdup_printf(custom_master_pipe, hub->width, hub->height, hub->fps_num, hub->fps_den);
+			} else if (!has_invalid && u_count == 2) {
+				pipe_desc = g_strdup_printf(custom_master_pipe, hub->width, hub->height);
 			} else {
 				pipe_desc = g_strdup(custom_master_pipe);
 			}
@@ -174,7 +192,10 @@ static void hub_render_callback(void *param, uint32_t cx, uint32_t cy)
 	if (hub->texrender[cur]) {
 		gs_texrender_begin(hub->texrender[cur], hub->width, hub->height);
 		gs_enable_blending(false);
+		gs_matrix_push();
+		gs_ortho(0.0f, (float)hub->width, 0.0f, (float)hub->height, -100.0f, 100.0f);
 		obs_view_render(hub->view);
+		gs_matrix_pop();
 		gs_texrender_end(hub->texrender[cur]);
 
 		// Copy texture into staging surface for zero-stall DMA
@@ -204,7 +225,7 @@ static void hub_render_callback(void *param, uint32_t cx, uint32_t cy)
 					}
 					gst_buffer_unmap(buf, &map);
 
-					GST_BUFFER_DURATION(buf) = gst_util_uint64_scale_int(1, GST_SECOND, hub->fps_num / hub->fps_den);
+					GST_BUFFER_DURATION(buf) = gst_util_uint64_scale_int(GST_SECOND, hub->fps_den, hub->fps_num);
 					gst_app_src_push_buffer(GST_APP_SRC(hub->appsrc), buf);
 				} else {
 					gst_buffer_unref(buf);
@@ -331,8 +352,9 @@ static bool hub_init(struct gst_master_hub *hub, const gst_hub_output_params_t *
 
 	struct obs_video_info ovi;
 	obs_get_video_info(&ovi);
-	hub->width = ovi.output_width ? ovi.output_width : 1920;
-	hub->height = ovi.output_height ? ovi.output_height : 1080;
+	// Canvas size matching OBS program output canvas (base resolution)
+	hub->width = ovi.base_width ? ovi.base_width : (ovi.output_width ? ovi.output_width : 1920);
+	hub->height = ovi.base_height ? ovi.base_height : (ovi.output_height ? ovi.output_height : 1080);
 	hub->fps_num = ovi.fps_num ? ovi.fps_num : 60;
 	hub->fps_den = ovi.fps_den ? ovi.fps_den : 1;
 
@@ -466,10 +488,29 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 		}
 	}
 
+	const char *requested_service = (params->rtsp_service && params->rtsp_service[0]) ? params->rtsp_service : "8554";
+
+	// Port Conflict Detection: Check if any active branch is already using this RTSP port
+	if (g_hub) {
+		pthread_mutex_lock(&g_hub->branch_lock);
+		struct gst_hub_branch *existing = g_hub->branches;
+		while (existing) {
+			if (existing->active && existing->service && strcmp(existing->service, requested_service) == 0) {
+				blog(LOG_ERROR, "[obs-gstreamer-hub] Cannot start RTSP branch '%s': Port %s is already in use by active branch '%s'!",
+					params->name ? params->name : "Output", requested_service, existing->name ? existing->name : "Unknown");
+				pthread_mutex_unlock(&g_hub->branch_lock);
+				pthread_mutex_unlock(&g_hub_mutex);
+				return NULL;
+			}
+			existing = existing->next;
+		}
+		pthread_mutex_unlock(&g_hub->branch_lock);
+	}
+
 	// Create new RTSP branch
 	struct gst_hub_branch *branch = bzalloc(sizeof(struct gst_hub_branch));
 	branch->name = bstrdup(params->name ? params->name : "Output");
-	branch->service = bstrdup(params->rtsp_service && params->rtsp_service[0] ? params->rtsp_service : "8554");
+	branch->service = bstrdup(requested_service);
 	branch->mount_point = bstrdup(params->rtsp_mount && params->rtsp_mount[0] ? params->rtsp_mount : "/live");
 	branch->hub = g_hub;
 	pthread_mutex_init(&branch->lock, NULL);
@@ -495,9 +536,16 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 	g_signal_connect(branch->factory, "media-configure", G_CALLBACK(media_configure_cb), branch);
 	gst_rtsp_mount_points_add_factory(branch->mounts, branch->mount_point, branch->factory);
 
-	if (gst_rtsp_server_attach(branch->server, NULL) == 0) {
-		blog(LOG_ERROR, "[obs-gstreamer-hub] Failed to attach RTSP server on port %s", branch->service);
+	branch->source_id = gst_rtsp_server_attach(branch->server, NULL);
+	if (branch->source_id == 0) {
+		blog(LOG_ERROR, "[obs-gstreamer-hub] Failed to attach RTSP server on port %s: address already in use or bind failed", branch->service);
 		gst_object_unref(branch->server);
+		if (branch->factory) {
+			gst_object_unref(branch->factory);
+		}
+		if (branch->mounts) {
+			gst_object_unref(branch->mounts);
+		}
 		bfree(branch->name);
 		bfree(branch->service);
 		bfree(branch->mount_point);
@@ -522,12 +570,10 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 	return branch;
 }
 
-/* Public API: Stop an active RTSP output branch */
-void gst_render_hub_stop_branch(gst_hub_branch_t *branch)
+/* Internal helper to stop branch assuming g_hub_mutex is already locked */
+static void gst_render_hub_stop_branch_internal(gst_hub_branch_t *branch)
 {
 	if (!branch) return;
-
-	pthread_mutex_lock(&g_hub_mutex);
 
 	struct gst_master_hub *hub = branch->hub;
 	if (hub) {
@@ -548,11 +594,28 @@ void gst_render_hub_stop_branch(gst_hub_branch_t *branch)
 	branch->active = false;
 	int branch_clients = branch->client_count;
 	branch->client_count = 0;
+	if (branch->source_id > 0) {
+		g_source_remove(branch->source_id);
+		branch->source_id = 0;
+	}
+	if (branch->mounts && branch->mount_point) {
+		gst_rtsp_mount_points_remove_factory(branch->mounts, branch->mount_point);
+	}
+	if (branch->factory) {
+		g_signal_handlers_disconnect_by_data(branch->factory, branch);
+		gst_object_unref(branch->factory);
+		branch->factory = NULL;
+	}
 	if (branch->appsrc) {
 		gst_object_unref(branch->appsrc);
 		branch->appsrc = NULL;
 	}
+	if (branch->mounts) {
+		gst_object_unref(branch->mounts);
+		branch->mounts = NULL;
+	}
 	if (branch->server) {
+		g_signal_handlers_disconnect_by_data(branch->server, branch);
 		gst_object_unref(branch->server);
 		branch->server = NULL;
 	}
@@ -580,7 +643,15 @@ void gst_render_hub_stop_branch(gst_hub_branch_t *branch)
 		hub_destroy(hub);
 		g_hub = NULL;
 	}
+}
 
+/* Public API: Stop an active RTSP output branch */
+void gst_render_hub_stop_branch(gst_hub_branch_t *branch)
+{
+	if (!branch) return;
+
+	pthread_mutex_lock(&g_hub_mutex);
+	gst_render_hub_stop_branch_internal(branch);
 	pthread_mutex_unlock(&g_hub_mutex);
 }
 
@@ -596,9 +667,7 @@ void gst_render_hub_shutdown(void)
 	pthread_mutex_lock(&g_hub_mutex);
 	if (g_hub) {
 		while (g_hub->branches) {
-			gst_hub_branch_t *next = g_hub->branches->next;
-			gst_render_hub_stop_branch(g_hub->branches);
-			(void)next;
+			gst_render_hub_stop_branch_internal(g_hub->branches);
 		}
 	}
 	pthread_mutex_unlock(&g_hub_mutex);
