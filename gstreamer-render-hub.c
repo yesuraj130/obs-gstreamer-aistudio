@@ -29,6 +29,7 @@ struct gst_hub_branch {
 	GstRTSPMountPoints *mounts;
 	GstRTSPMediaFactory *factory;
 	GstElement *appsrc;
+	GstRTSPMedia *media;
 	pthread_mutex_t lock;
 	bool active;
 	int client_count;
@@ -295,6 +296,16 @@ static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media
 	}
 	branch->appsrc = appsrc;
 	branch->client_count++;
+
+	if (branch->media && branch->media != media) {
+		g_signal_handlers_disconnect_by_data(branch->media, branch);
+		gst_object_unref(branch->media);
+		branch->media = NULL;
+	}
+	if (!branch->media) {
+		branch->media = GST_RTSP_MEDIA(gst_object_ref(media));
+		g_signal_connect(media, "unprepared", G_CALLBACK(media_unprepared_cb), branch);
+	}
 	pthread_mutex_unlock(&branch->lock);
 
 	if (branch->hub) {
@@ -307,7 +318,6 @@ static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media
 		}
 	}
 
-	g_signal_connect(media, "unprepared", G_CALLBACK(media_unprepared_cb), branch);
 	gst_object_unref(element);
 	blog(LOG_INFO, "[obs-gstreamer-hub] RTSP client connected on port %s%s (Active clients: %d)",
 		branch->service, branch->mount_point,
@@ -322,9 +332,16 @@ static void media_unprepared_cb(GstRTSPMedia *media, gpointer user_data)
 	if (branch->client_count > 0) {
 		branch->client_count--;
 	}
-	if (branch->client_count == 0 && branch->appsrc) {
-		gst_object_unref(branch->appsrc);
-		branch->appsrc = NULL;
+	if (branch->client_count == 0) {
+		if (branch->appsrc) {
+			gst_object_unref(branch->appsrc);
+			branch->appsrc = NULL;
+		}
+		if (branch->media) {
+			g_signal_handlers_disconnect_by_data(branch->media, branch);
+			gst_object_unref(branch->media);
+			branch->media = NULL;
+		}
 	}
 	pthread_mutex_unlock(&branch->lock);
 
@@ -350,8 +367,13 @@ static bool hub_init(struct gst_master_hub *hub, const gst_hub_output_params_t *
 	hub->source_type = bstrdup(params->source_type ? params->source_type : "Program Output");
 	hub->source_name = bstrdup(params->source_name ? params->source_name : "");
 
-	struct obs_video_info ovi;
-	obs_get_video_info(&ovi);
+	struct obs_video_info ovi = {};
+	if (!obs_get_video_info(&ovi)) {
+		ovi.base_width = 1920;
+		ovi.base_height = 1080;
+		ovi.fps_num = 60;
+		ovi.fps_den = 1;
+	}
 	// Canvas size matching OBS program output canvas (base resolution)
 	hub->width = ovi.base_width ? ovi.base_width : (ovi.output_width ? ovi.output_width : 1920);
 	hub->height = ovi.base_height ? ovi.base_height : (ovi.output_height ? ovi.output_height : 1080);
@@ -594,6 +616,11 @@ static void gst_render_hub_stop_branch_internal(gst_hub_branch_t *branch)
 	branch->active = false;
 	int branch_clients = branch->client_count;
 	branch->client_count = 0;
+	if (branch->media) {
+		g_signal_handlers_disconnect_by_data(branch->media, branch);
+		gst_object_unref(branch->media);
+		branch->media = NULL;
+	}
 	if (branch->source_id > 0) {
 		g_source_remove(branch->source_id);
 		branch->source_id = 0;

@@ -390,6 +390,8 @@ static gboolean idle_reply(gpointer user_data)
 	char *location = g_strdup_printf("/whep/%s", ctx->id);
 	SoupMessageHeaders *headers = soup_server_message_get_response_headers(ctx->msg);
 	soup_message_headers_append(headers, "Location", location);
+	soup_message_headers_append(headers, "Access-Control-Allow-Origin", "*");
+	soup_message_headers_append(headers, "Access-Control-Expose-Headers", "Location, Content-Type");
 	soup_server_message_set_status(ctx->msg, ctx->status, NULL);
 	soup_server_message_set_response(ctx->msg, "application/sdp", SOUP_MEMORY_COPY,
 		ctx->sdp ? ctx->sdp : "", ctx->sdp ? strlen(ctx->sdp) : 0);
@@ -450,22 +452,38 @@ static void on_gathering_complete(GstElement *webrtcbin, GParamSpec *pspec, gpoi
 	if (state != GST_WEBRTC_ICE_GATHERING_STATE_COMPLETE)
 		return;
 
-	blog(LOG_INFO, "[obs-gstreamer] WHEP session %s: ICE gathering complete, sending 201 answer",
-		ctx->session->id);
 	g_signal_handlers_disconnect_by_func(webrtcbin, on_gathering_complete, user_data);
 
 	GstWebRTCSessionDescription *local = NULL;
 	g_object_get(webrtcbin, "local-description", &local, NULL);
-	gchar *sdp_text = gst_sdp_message_as_text(local->sdp);
-	gst_webrtc_session_description_free(local);
+	gchar *sdp_text = local ? gst_sdp_message_as_text(local->sdp) : NULL;
+	if (local)
+		gst_webrtc_session_description_free(local);
+
+	g_mutex_lock(&ctx->webrtc->sessions_lock);
+	whep_session_t *session = ctx->session ? g_hash_table_lookup(ctx->webrtc->sessions, ctx->session->id) : NULL;
+	if (!session || session->replied || !session->pending_msg) {
+		g_mutex_unlock(&ctx->webrtc->sessions_lock);
+		blog(LOG_WARNING, "[obs-gstreamer] WHEP session %s: completed after timeout/cleanup",
+			ctx->session ? ctx->session->id : "unknown");
+		g_free(sdp_text);
+		g_free(ctx);
+		return;
+	}
+
+	blog(LOG_INFO, "[obs-gstreamer] WHEP session %s: ICE gathering complete, sending 201 answer",
+		session->id);
 
 	reply_ctx_t *reply = g_new0(reply_ctx_t, 1);
 	reply->webrtc = ctx->webrtc;
-	reply->msg = g_object_ref(ctx->session->pending_msg);
-	reply->id = g_strdup(ctx->session->id);
+	reply->msg = g_object_ref(session->pending_msg);
+	reply->id = g_strdup(session->id);
 	reply->sdp = sdp_text;
 	reply->status = SOUP_STATUS_CREATED;
 	g_idle_add(idle_reply, reply);
+	g_mutex_unlock(&ctx->webrtc->sessions_lock);
+
+	g_free(ctx);
 }
 
 static void on_local_description_set(GstPromise *promise, gpointer user_data)
@@ -528,14 +546,20 @@ static void on_answer_created(GstPromise *promise, gpointer user_data)
 
 	if (!answer) {
 		blog(LOG_ERROR, "[obs-gstreamer] WHEP session %s: create-answer failed",
-			ctx->session->id);
-		reply_ctx_t *reply_ctx = g_new0(reply_ctx_t, 1);
-		reply_ctx->webrtc = ctx->webrtc;
-		reply_ctx->msg = g_object_ref(ctx->session->pending_msg);
-		reply_ctx->id = g_strdup(ctx->session->id);
-		reply_ctx->sdp = NULL;
-		reply_ctx->status = SOUP_STATUS_INTERNAL_SERVER_ERROR;
-		g_idle_add(idle_reply, reply_ctx);
+			ctx->session ? ctx->session->id : "unknown");
+		g_mutex_lock(&ctx->webrtc->sessions_lock);
+		whep_session_t *session = ctx->session ? g_hash_table_lookup(ctx->webrtc->sessions, ctx->session->id) : NULL;
+		if (session && !session->replied && session->pending_msg) {
+			reply_ctx_t *reply_ctx = g_new0(reply_ctx_t, 1);
+			reply_ctx->webrtc = ctx->webrtc;
+			reply_ctx->msg = g_object_ref(session->pending_msg);
+			reply_ctx->id = g_strdup(session->id);
+			reply_ctx->sdp = NULL;
+			reply_ctx->status = SOUP_STATUS_INTERNAL_SERVER_ERROR;
+			g_idle_add(idle_reply, reply_ctx);
+		}
+		g_mutex_unlock(&ctx->webrtc->sessions_lock);
+		g_free(ctx);
 		return;
 	}
 
@@ -701,6 +725,8 @@ static void whep_delete(struct gstreamer_webrtc *webrtc, SoupServerMessage *msg,
 	}
 
 	session_teardown_async(webrtc, id);
+	SoupMessageHeaders *headers = soup_server_message_get_response_headers(msg);
+	soup_message_headers_append(headers, "Access-Control-Allow-Origin", "*");
 	soup_server_message_set_status(msg, SOUP_STATUS_OK, NULL);
 }
 
@@ -709,7 +735,14 @@ static void whep_handler(SoupServer *server, SoupServerMessage *msg, const char 
 {
 	struct gstreamer_webrtc *webrtc = user_data;
 
-	if (g_strcmp0(soup_server_message_get_method(msg), "POST") == 0) {
+	if (g_strcmp0(soup_server_message_get_method(msg), "OPTIONS") == 0) {
+		SoupMessageHeaders *headers = soup_server_message_get_response_headers(msg);
+		soup_message_headers_append(headers, "Access-Control-Allow-Origin", "*");
+		soup_message_headers_append(headers, "Access-Control-Allow-Methods", "POST, DELETE, OPTIONS");
+		soup_message_headers_append(headers, "Access-Control-Allow-Headers", "Content-Type, Accept");
+		soup_message_headers_append(headers, "Access-Control-Expose-Headers", "Location, Content-Type");
+		soup_server_message_set_status(msg, SOUP_STATUS_NO_CONTENT, NULL);
+	} else if (g_strcmp0(soup_server_message_get_method(msg), "POST") == 0) {
 		whep_post(webrtc, msg);
 	} else if (g_strcmp0(soup_server_message_get_method(msg), "DELETE") == 0) {
 		whep_delete(webrtc, msg, path);

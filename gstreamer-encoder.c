@@ -87,15 +87,18 @@ char *gstreamer_get_format(data_t *data)
 	case VIDEO_FORMAT_RGBA:
 		format = "RGBA";
 		data->buffer_size =
-			data->ovi.output_width * data->ovi.output_height * 3;
+			data->ovi.output_width * data->ovi.output_height * 4;
+		break;
 	case VIDEO_FORMAT_BGRA:
 		format = "BGRA";
 		data->buffer_size =
-			data->ovi.output_width * data->ovi.output_height * 3;
+			data->ovi.output_width * data->ovi.output_height * 4;
+		break;
 	case VIDEO_FORMAT_BGRX:
 		format = "BGRX";
 		data->buffer_size =
-			data->ovi.output_width * data->ovi.output_height * 3;
+			data->ovi.output_width * data->ovi.output_height * 4;
+		break;
 	case VIDEO_FORMAT_I444:
 		format = "Y444";
 		data->buffer_size =
@@ -194,6 +197,7 @@ void *gstreamer_encoder_create_h264(obs_data_t *settings,
 				data->ovi.fps_num / data->ovi.fps_den);
 	} else {
 		blog(LOG_ERROR, "invalid encoder selected");
+		g_free(data);
 		return NULL;
 	}
 
@@ -212,6 +216,8 @@ void *gstreamer_encoder_create_h264(obs_data_t *settings,
 
 	if (err != NULL) {
 		blog(LOG_ERROR, "%s", err->message);
+		g_error_free(err);
+		g_free(data);
 		return NULL;
 	}
 
@@ -280,6 +286,7 @@ void *gstreamer_encoder_create_h265(obs_data_t *settings,
 				data->ovi.fps_num / data->ovi.fps_den);
 	} else {
 		blog(LOG_ERROR, "invalid encoder selected");
+		g_free(data);
 		return NULL;
 	}
 
@@ -298,6 +305,8 @@ void *gstreamer_encoder_create_h265(obs_data_t *settings,
 
 	if (err != NULL) {
 		blog(LOG_ERROR, "%s", err->message);
+		g_error_free(err);
+		g_free(data);
 		return NULL;
 	}
 
@@ -389,7 +398,7 @@ bool gstreamer_encoder_encode(void *p, struct encoder_frame *frame,
 		size_t size;
 
 		// this is pretty lazy..
-		for (size = 0; size < data->info.size; size++) {
+		for (size = 0; size + 4 < data->info.size; size++) {
 			if (data->info.data[size + 0] == 0 &&
 			    data->info.data[size + 1] == 0 &&
 			    data->info.data[size + 2] == 0 &&

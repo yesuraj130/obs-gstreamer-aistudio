@@ -33,8 +33,10 @@ typedef struct {
 	GstElement *pipe;
 	GstElement *video;
 	GstRTSPServer *server;
+	guint server_source_id;
 	GstRTSPMountPoints *mounts;
 	GstRTSPMediaFactory *factory;
+	GstRTSPMedia *media;
 	char *mount_point;
 	bool rtsp_server;
 	bool webrtc_output;
@@ -112,6 +114,7 @@ static void client_connected_cb(GstRTSPServer *server, GstRTSPClient *client, gp
 
 static void media_unprepared_cb(GstRTSPMedia *media, gpointer user_data)
 {
+	(void)media;
 	data_t *data = user_data;
 	blog(LOG_INFO, "[obs-gstreamer] RTSP media unprepared (all clients disconnected), resetting appsrc");
 
@@ -123,6 +126,11 @@ static void media_unprepared_cb(GstRTSPMedia *media, gpointer user_data)
 	if (data->audio) {
 		gst_object_unref(data->audio);
 		data->audio = NULL;
+	}
+	if (data->media) {
+		g_signal_handlers_disconnect_by_data(data->media, data);
+		gst_object_unref(data->media);
+		data->media = NULL;
 	}
 	g_mutex_unlock(&data->lock);
 }
@@ -154,9 +162,17 @@ static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media
 	if (data->audio)
 		gst_object_unref(data->audio);
 	data->audio = appsrc_audio;
-	g_mutex_unlock(&data->lock);
 
-	g_signal_connect(media, "unprepared", G_CALLBACK(media_unprepared_cb), data);
+	if (data->media && data->media != media) {
+		g_signal_handlers_disconnect_by_data(data->media, data);
+		gst_object_unref(data->media);
+		data->media = NULL;
+	}
+	if (!data->media) {
+		data->media = GST_RTSP_MEDIA(gst_object_ref(media));
+		g_signal_connect(media, "unprepared", G_CALLBACK(media_unprepared_cb), data);
+	}
+	g_mutex_unlock(&data->lock);
 
 	gst_bus_add_watch(bus, bus_callback, data);
 	gst_object_unref(bus);
@@ -239,11 +255,22 @@ void gstreamer_output_destroy(void *p)
 	}
 	g_mutex_unlock(&data->lock);
 
+	if (data->media) {
+		g_signal_handlers_disconnect_by_data(data->media, data);
+		gst_object_unref(data->media);
+		data->media = NULL;
+	}
+
 	if (data->server) {
+		if (data->server_source_id > 0) {
+			g_source_remove(data->server_source_id);
+			data->server_source_id = 0;
+		}
 		if (data->mounts && data->mount_point) {
 			gst_rtsp_mount_points_remove_factory(data->mounts, data->mount_point);
 		}
 		if (data->factory) {
+			g_signal_handlers_disconnect_by_data(data->factory, data);
 			g_object_unref(data->factory);
 			data->factory = NULL;
 		}
@@ -251,8 +278,11 @@ void gstreamer_output_destroy(void *p)
 			g_object_unref(data->mounts);
 			data->mounts = NULL;
 		}
-		gst_object_unref(data->server);
-		data->server = NULL;
+		if (data->server) {
+			g_signal_handlers_disconnect_by_data(data->server, data);
+			gst_object_unref(data->server);
+			data->server = NULL;
+		}
 	}
 
 	g_free(data->mount_point);
@@ -313,9 +343,29 @@ bool gstreamer_output_start(void *p)
 		g_signal_connect(data->server, "client-connected", G_CALLBACK(client_connected_cb), data);
 		g_signal_connect(data->factory, "media-configure", G_CALLBACK(media_configure_cb), data);
 		gst_rtsp_mount_points_add_factory(data->mounts, data->mount_point, data->factory);
-		if (gst_rtsp_server_attach(data->server, NULL) == 0) {
+		data->server_source_id = gst_rtsp_server_attach(data->server, NULL);
+		if (data->server_source_id == 0) {
 			blog(LOG_ERROR, "[obs-gstreamer] Failed to attach RTSP server on port %s: address already in use", service && service[0] ? service : "8554");
 			obs_output_set_last_error(data->output, "Failed to start RTSP server: port already in use or bind failed");
+			if (data->mounts && data->mount_point) {
+				gst_rtsp_mount_points_remove_factory(data->mounts, data->mount_point);
+			}
+			if (data->factory) {
+				g_signal_handlers_disconnect_by_data(data->factory, data);
+				g_object_unref(data->factory);
+				data->factory = NULL;
+			}
+			if (data->mounts) {
+				g_object_unref(data->mounts);
+				data->mounts = NULL;
+			}
+			if (data->server) {
+				g_signal_handlers_disconnect_by_data(data->server, data);
+				gst_object_unref(data->server);
+				data->server = NULL;
+			}
+			g_free(data->mount_point);
+			data->mount_point = NULL;
 			g_free(launch);
 			return false;
 		}
@@ -401,11 +451,22 @@ void gstreamer_output_stop(void *p, uint64_t ts)
 		gst_object_unref(audio);
 	}
 
+	if (data->media) {
+		g_signal_handlers_disconnect_by_data(data->media, data);
+		gst_object_unref(data->media);
+		data->media = NULL;
+	}
+
 	if (data->server) {
+		if (data->server_source_id > 0) {
+			g_source_remove(data->server_source_id);
+			data->server_source_id = 0;
+		}
 		if (data->mounts && data->mount_point) {
 			gst_rtsp_mount_points_remove_factory(data->mounts, data->mount_point);
 		}
 		if (data->factory) {
+			g_signal_handlers_disconnect_by_data(data->factory, data);
 			g_object_unref(data->factory);
 			data->factory = NULL;
 		}
@@ -414,9 +475,12 @@ void gstreamer_output_stop(void *p, uint64_t ts)
 			data->mounts = NULL;
 		}
 		if (data->server) {
+			g_signal_handlers_disconnect_by_data(data->server, data);
 			gst_object_unref(data->server);
 			data->server = NULL;
 		}
+		g_free(data->mount_point);
+		data->mount_point = NULL;
 		blog(LOG_INFO, "gstreamer_output_stop = RTSP server stopped");
 	}
 

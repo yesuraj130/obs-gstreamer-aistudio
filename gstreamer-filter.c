@@ -232,8 +232,10 @@ gstreamer_filter_filter_video(void *p, struct obs_source_frame *frame)
 			     err->message);
 			g_error_free(err);
 
-			gst_object_unref(data->pipe);
-			data->pipe = NULL;
+			if (data->pipe) {
+				gst_object_unref(data->pipe);
+				data->pipe = NULL;
+			}
 
 			return frame;
 		}
@@ -286,12 +288,15 @@ gstreamer_filter_filter_audio(void *p, struct obs_audio_data *audio_data)
 		struct obs_audio_info audio_info;
 
 		obs_get_audio_info(&audio_info);
+		size_t channels = get_audio_channels(audio_info.speakers);
+		if (channels == 0)
+			channels = 2;
 
 		gst_audio_info_init(&data->audio_info);
 		gst_audio_info_set_format(&data->audio_info,
 					  GST_AUDIO_FORMAT_F32LE,
 					  audio_info.samples_per_sec,
-					  audio_info.speakers, NULL);
+					  (gint)channels, NULL);
 		data->audio_info.layout = GST_AUDIO_LAYOUT_NON_INTERLEAVED;
 
 		gchar *str = g_strdup_printf(
@@ -309,8 +314,10 @@ gstreamer_filter_filter_audio(void *p, struct obs_audio_data *audio_data)
 			     err->message);
 			g_error_free(err);
 
-			gst_object_unref(data->pipe);
-			data->pipe = NULL;
+			if (data->pipe) {
+				gst_object_unref(data->pipe);
+				data->pipe = NULL;
+			}
 
 			return audio_data;
 		}

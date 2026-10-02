@@ -583,13 +583,14 @@ static void start_selected(gstreamer_dock_state *state, int row)
 	// Port Conflict Detection: If starting an RTSP server, check if port is already taken by another active output
 	const bool is_rtsp = config.use_render_hub || (config.mode == "RTSP");
 	if (is_rtsp) {
-		const QString target_port = config.rtsp_service.trimmed();
+		const QString target_port = config.rtsp_service.trimmed().isEmpty() ? "8554" : config.rtsp_service.trimmed();
 		for (size_t i = 0; i < state->configurations.size(); ++i) {
 			if (static_cast<int>(i) == row) continue;
 			const auto &other = state->configurations[i];
 			if (is_config_active(other)) {
 				const bool other_is_rtsp = other.use_render_hub || (other.mode == "RTSP");
-				if (other_is_rtsp && other.rtsp_service.trimmed() == target_port) {
+				const QString other_port = other.rtsp_service.trimmed().isEmpty() ? "8554" : other.rtsp_service.trimmed();
+				if (other_is_rtsp && other_port == target_port) {
 					QMessageBox::critical(
 						state->widget,
 						"RTSP Port Conflict",
@@ -620,12 +621,13 @@ static void start_selected(gstreamer_dock_state *state, int row)
 
 		config.hub_branch = gst_render_hub_start_branch(&params);
 		if (!config.hub_branch) {
+			const QString display_port = config.rtsp_service.trimmed().isEmpty() ? "8554" : config.rtsp_service.trimmed();
 			QMessageBox::critical(
 				state->widget,
 				"Failed to Start RTSP Server",
 				QString("Could not start Direct GPU RTSP server for '%1' on port %2.\n\n"
 				        "The port may already be in use by another application or server.")
-					.arg(config.name, config.rtsp_service));
+					.arg(config.name, display_port));
 		}
 		refresh_rows(state);
 		save_configurations(state);
@@ -713,6 +715,19 @@ static void edit_master_pipeline(QWidget *parent, gstreamer_dock_state *state)
 	}
 }
 
+static void dock_frontend_event(enum obs_frontend_event event, void *private_data)
+{
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+		auto *st = static_cast<gstreamer_dock_state *>(private_data);
+		if (!st) return;
+		for (int index = 0; index < static_cast<int>(st->configurations.size()); ++index) {
+			if (st->configurations[index].auto_start && !is_config_active(st->configurations[index])) {
+				start_selected(st, index);
+			}
+		}
+	}
+}
+
 static QWidget *create_gstreamer_dock_widget(void)
 {
 	auto *state = new gstreamer_dock_state();
@@ -773,16 +788,7 @@ static QWidget *create_gstreamer_dock_widget(void)
 	if (state->configurations.empty())
 		state->configurations.emplace_back();
 	refresh_rows(state);
-	obs_frontend_add_event_callback([](enum obs_frontend_event event, void *private_data) {
-		if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
-			auto *st = static_cast<gstreamer_dock_state *>(private_data);
-			for (int index = 0; index < static_cast<int>(st->configurations.size()); ++index) {
-				if (st->configurations[index].auto_start && !is_config_active(st->configurations[index])) {
-					start_selected(st, index);
-				}
-			}
-		}
-	}, state);
+	obs_frontend_add_event_callback(dock_frontend_event, state);
 	QTimer::singleShot(200, widget, [state]() {
 		for (int index = 0; index < static_cast<int>(state->configurations.size()); ++index) {
 			if (state->configurations[index].auto_start && !is_config_active(state->configurations[index]))
@@ -790,6 +796,7 @@ static QWidget *create_gstreamer_dock_widget(void)
 		}
 	});
 	QObject::connect(widget, &QObject::destroyed, [state]() {
+		obs_frontend_remove_event_callback(dock_frontend_event, state);
 		for (auto &config : state->configurations)
 			stop_output(config);
 		save_configurations(state);
