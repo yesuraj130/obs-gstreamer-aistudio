@@ -27,10 +27,19 @@ project('obs-gstreamer', ['c', 'cpp'],
 
 obs_dep = dependency('libobs', required : false)
 if not obs_dep.found()
-  obs_dep = meson.get_compiler('c').find_library('obs', has_headers : 'obs/obs.h')
+  obs_dep = meson.get_compiler('c').find_library('obs', has_headers : 'obs/obs.h', required : false)
+endif
+if not obs_dep.found()
+  obs_dep = meson.get_compiler('c').find_library('obs', has_headers : 'obs.h')
 endif
 
-obs_frontend_dep = meson.get_compiler('cpp').find_library('obs-frontend-api', has_headers : 'obs/obs-frontend-api.h')
+obs_frontend_dep = dependency('obs-frontend-api', required : false)
+if not obs_frontend_dep.found()
+  obs_frontend_dep = meson.get_compiler('cpp').find_library('obs-frontend-api', has_headers : 'obs/obs-frontend-api.h', required : false)
+endif
+if not obs_frontend_dep.found()
+  obs_frontend_dep = meson.get_compiler('cpp').find_library('obs-frontend-api', has_headers : 'obs-frontend-api.h', required : false)
+endif
 
 name_suffix = []
 if host_machine.system() == 'darwin'
@@ -66,22 +75,7 @@ else
   extra_c_args += ['-DENABLE_WEBRTC=0']
 endif
 
-deps = [
-  obs_dep,
-  obs_frontend_dep,
-  dependency('gstreamer-1.0', version : '>=1.16.0'),
-  dependency('gstreamer-video-1.0'),
-  dependency('gstreamer-audio-1.0'),
-  dependency('gstreamer-app-1.0'),
-  dependency('gstreamer-net-1.0'),
-  dependency('gstreamer-rtsp-server-1.0'),
-]
-if qt_dep.found()
-  deps += qt_dep
-endif
-deps += webrtc_deps
-
-shared_library('obs-gstreamer',
+sources = [
   'gstreamer.c',
   'gstreamer-source.c',
   'gstreamer-encoder.c',
@@ -89,13 +83,36 @@ shared_library('obs-gstreamer',
   'gstreamer-filter.c',
   'gstreamer-output.c',
   'gstreamer-webrtc.c',
-  'gstreamer-dock.cpp',
   vcs_tag(
     command : ['git', 'rev-parse', '--short', 'HEAD'],
     input : 'version.c.in',
     output : 'version.c',
     fallback : 'custom',
   ),
+]
+
+deps = [
+  obs_dep,
+  dependency('gstreamer-1.0', version : '>=1.16.0'),
+  dependency('gstreamer-video-1.0'),
+  dependency('gstreamer-audio-1.0'),
+  dependency('gstreamer-app-1.0'),
+  dependency('gstreamer-net-1.0'),
+  dependency('gstreamer-rtsp-server-1.0'),
+]
+
+if qt_dep.found() and obs_frontend_dep.found()
+  sources += ['gstreamer-dock.cpp']
+  deps += [qt_dep, obs_frontend_dep]
+  extra_c_args += ['-DENABLE_DOCK=1']
+else
+  extra_c_args += ['-DENABLE_DOCK=0']
+endif
+
+deps += webrtc_deps
+
+shared_library('obs-gstreamer',
+  sources,
   name_prefix : '',
   name_suffix : name_suffix,
   c_args : extra_c_args,

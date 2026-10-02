@@ -29,26 +29,59 @@ jobs:
 
       - name: Fetch and prepare OBS Studio 27.2.4 (x86) SDK
         run: |
-          mkdir -p obs-sdk-win32
+          mkdir -p obs-sdk-win32/include/obs
+          mkdir -p obs-sdk-win32/lib/pkgconfig
           cd obs-sdk-win32
           wget -q https://github.com/obsproject/obs-studio/releases/download/27.2.4/OBS-Studio-27.2.4-Full-x86.zip
-          unzip -q OBS-Studio-27.2.4-Full-x86.zip "bin/32bit/*"
+          unzip -q -o OBS-Studio-27.2.4-Full-x86.zip "bin/32bit/*"
           wget -q https://github.com/obsproject/obs-studio/archive/refs/tags/27.2.4.tar.gz
           tar -xzf 27.2.4.tar.gz
+          
+          # Provide headers in both include/obs/ and include/
+          cp -r obs-studio-27.2.4/libobs/* include/obs/
+          cp -r obs-studio-27.2.4/UI/obs-frontend-api/* include/obs/
+          cp -r obs-studio-27.2.4/libobs/* include/
+          cp -r obs-studio-27.2.4/UI/obs-frontend-api/* include/
           
           # Generate MinGW import libraries from 32-bit OBS binaries
           gendef bin/32bit/obs.dll
           i686-w64-mingw32-dlltool -d obs.def -l libobs.dll.a -D obs.dll
           gendef bin/32bit/obs-frontend-api.dll
           i686-w64-mingw32-dlltool -d obs-frontend-api.def -l libobs-frontend-api.dll.a -D obs-frontend-api.dll
+
+          SDK_DIR="$(pwd)"
+          cat << EOF > lib/pkgconfig/libobs.pc
+prefix=${SDK_DIR}
+libdir=${SDK_DIR}
+includedir=${SDK_DIR}/include
+
+Name: libobs
+Description: OBS Studio library
+Version: 27.2.4
+Libs: -L\${libdir} -lobs
+Cflags: -I\${includedir}
+EOF
+
+          cat << EOF > lib/pkgconfig/obs-frontend-api.pc
+prefix=${SDK_DIR}
+libdir=${SDK_DIR}
+includedir=${SDK_DIR}/include
+
+Name: obs-frontend-api
+Description: OBS Studio Frontend API library
+Version: 27.2.4
+Libs: -L\${libdir} -lobs-frontend-api
+Cflags: -I\${includedir}
+EOF
           cd ..
 
-      - name: Fetch and prepare GStreamer 1.18.6 (x86) MinGW SDK
+      - name: Fetch and prepare GStreamer (x86) MinGW SDK
         run: |
           mkdir -p gst-sdk-win32
           cd gst-sdk-win32
-          wget -q https://gstreamer.freedesktop.org/data/pkg/windows/1.18.6/mingw/gstreamer-1.0-devel-mingw-x86-1.18.6.msi
-          msiextract gstreamer-1.0-devel-mingw-x86-1.18.6.msi
+          GST_URL="https://gstreamer.freedesktop.org/data/pkg/windows/1.18.6/mingw/gstreamer-1.0-devel-mingw-x86-1.18.6.msi"
+          wget -q "$GST_URL" -O gst-devel.msi || wget -q https://gstreamer.freedesktop.org/data/pkg/windows/1.20.7/mingw/gstreamer-1.0-devel-mingw-x86-1.20.7.msi -O gst-devel.msi
+          msiextract gst-devel.msi
           
           # Normalize pkg-config paths to current extracted location
           GST_ROOT="$(pwd)/gstreamer/1.0/mingw_x86"
@@ -57,20 +90,13 @@ jobs:
 
       - name: Configure Meson build (32-bit x86, Win7 SP1 target)
         run: |
-          export PKG_CONFIG_LIBDIR="$(pwd)/gst-sdk-win32/gstreamer/1.0/mingw_x86/lib/pkgconfig"
-          export PKG_CONFIG_PATH="${PKG_CONFIG_LIBDIR}"
-          export C_INCLUDE_PATH="$(pwd)/obs-sdk-win32/obs-studio-27.2.4/libobs:$(pwd)/obs-sdk-win32/obs-studio-27.2.4/UI/obs-frontend-api"
-          export CPLUS_INCLUDE_PATH="${C_INCLUDE_PATH}"
-          export LIBRARY_PATH="$(pwd)/obs-sdk-win32"
+          export PKG_CONFIG_PATH="$(pwd)/obs-sdk-win32/lib/pkgconfig:$(pwd)/gst-sdk-win32/gstreamer/1.0/mingw_x86/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="${PKG_CONFIG_PATH}"
           
           meson setup build-win32 \
             --cross-file cross/i686-w64-mingw32.ini \
             --buildtype release \
-            -Dwebrtc=disabled \
-            -Dc_args="-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 -I$(pwd)/obs-sdk-win32/obs-studio-27.2.4/libobs" \
-            -Dcpp_args="-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 -I$(pwd)/obs-sdk-win32/obs-studio-27.2.4/libobs -I$(pwd)/obs-sdk-win32/obs-studio-27.2.4/UI/obs-frontend-api" \
-            -Dc_link_args="-L$(pwd)/obs-sdk-win32" \
-            -Dcpp_link_args="-L$(pwd)/obs-sdk-win32"
+            -Dwebrtc=disabled
 
       - name: Compile 32-bit Plugin
         run: |
@@ -82,27 +108,27 @@ jobs:
           cp build-win32/obs-gstreamer.dll package-win32/obs-plugins/32bit/
           
           cat << 'EOF' > package-win32/README-INSTALL-OBS27-WIN32.txt
-          =============================================================
-          obs-gstreamer for OBS Studio 27.2.4 (32-bit / Windows 7 SP1)
-          Target: x86 (32-bit), Intel Core i3-3217U / Ivy Bridge HD 4000
-          =============================================================
+=============================================================
+obs-gstreamer for OBS Studio 27.2.4 (32-bit / Windows 7 SP1)
+Target: x86 (32-bit), Intel Core i3-3217U / Ivy Bridge HD 4000
+=============================================================
 
-          Prerequisites:
-          1. Windows 7 SP1 with KB4474419 (SHA-2) and Universal CRT (KB2999226).
-          2. Official 32-bit GStreamer Runtime (MinGW version 1.18.6 x86 recommended):
-             https://gstreamer.freedesktop.org/data/pkg/windows/1.18.6/mingw/gstreamer-1.0-mingw-x86-1.18.6.msi
-             * Ensure the GStreamer bin folder (e.g. C:\gstreamer\1.0\mingw_x86\bin) is added to your Windows PATH.
-          3. OBS Studio 27.2.4 (32-bit):
-             https://github.com/obsproject/obs-studio/releases/tag/27.2.4
+Prerequisites:
+1. Windows 7 SP1 with KB4474419 (SHA-2) and Universal CRT (KB2999226).
+2. Official 32-bit GStreamer Runtime (MinGW version 1.18.6 or 1.20.7 x86):
+   https://gstreamer.freedesktop.org/data/pkg/windows/1.18.6/mingw/gstreamer-1.0-mingw-x86-1.18.6.msi
+   * Ensure the GStreamer bin folder (e.g. C:\gstreamer\1.0\mingw_x86\bin) is added to your Windows PATH.
+3. OBS Studio 27.2.4 (32-bit):
+   https://github.com/obsproject/obs-studio/releases/tag/27.2.4
 
-          Installation:
-          Copy the contents of 'obs-plugins/32bit/obs-gstreamer.dll' into your OBS Studio 32-bit plugin folder:
-          C:\Program Files (x86)\obs-studio\obs-plugins\32bit\obs-gstreamer.dll
+Installation:
+Copy 'obs-plugins/32bit/obs-gstreamer.dll' into your OBS Studio 32-bit plugin folder:
+C:\Program Files (x86)\obs-studio\obs-plugins\32bit\obs-gstreamer.dll
 
-          Performance Tips for Intel Core i3-3217U:
-          - Set OBS canvas and output to 1280x720 @ 30 FPS.
-          - Use Intel Quick Sync hardware elements (qsvh264dec / qsvh264enc) for low CPU usage.
-          EOF
+Performance Tips for Intel Core i3-3217U:
+- Set OBS canvas and output to 1280x720 @ 30 FPS.
+- Use Intel Quick Sync hardware elements (qsvh264dec / qsvh264enc) for low CPU usage.
+EOF
           
           cd package-win32
           zip -r ../obs-gstreamer-obs27-win32.zip ./*
@@ -134,26 +160,59 @@ jobs:
 
       - name: Fetch and prepare OBS Studio 30.2.2 (x64) SDK
         run: |
-          mkdir -p obs-sdk-win64
+          mkdir -p obs-sdk-win64/include/obs
+          mkdir -p obs-sdk-win64/lib/pkgconfig
           cd obs-sdk-win64
           wget -q https://github.com/obsproject/obs-studio/releases/download/30.2.2/OBS-Studio-30.2.2-Windows.zip
-          unzip -q OBS-Studio-30.2.2-Windows.zip "bin/64bit/*"
+          unzip -q -o OBS-Studio-30.2.2-Windows.zip "bin/64bit/*"
           wget -q https://github.com/obsproject/obs-studio/archive/refs/tags/30.2.2.tar.gz
           tar -xzf 30.2.2.tar.gz
+          
+          # Provide headers in both include/obs/ and include/
+          cp -r obs-studio-30.2.2/libobs/* include/obs/
+          cp -r obs-studio-30.2.2/UI/obs-frontend-api/* include/obs/
+          cp -r obs-studio-30.2.2/libobs/* include/
+          cp -r obs-studio-30.2.2/UI/obs-frontend-api/* include/
           
           # Generate MinGW import libraries from 64-bit OBS binaries
           gendef bin/64bit/obs.dll
           x86_64-w64-mingw32-dlltool -d obs.def -l libobs.dll.a -D obs.dll
           gendef bin/64bit/obs-frontend-api.dll
           x86_64-w64-mingw32-dlltool -d obs-frontend-api.def -l libobs-frontend-api.dll.a -D obs-frontend-api.dll
+
+          SDK_DIR="$(pwd)"
+          cat << EOF > lib/pkgconfig/libobs.pc
+prefix=${SDK_DIR}
+libdir=${SDK_DIR}
+includedir=${SDK_DIR}/include
+
+Name: libobs
+Description: OBS Studio library
+Version: 30.2.2
+Libs: -L\${libdir} -lobs
+Cflags: -I\${includedir}
+EOF
+
+          cat << EOF > lib/pkgconfig/obs-frontend-api.pc
+prefix=${SDK_DIR}
+libdir=${SDK_DIR}
+includedir=${SDK_DIR}/include
+
+Name: obs-frontend-api
+Description: OBS Studio Frontend API library
+Version: 30.2.2
+Libs: -L\${libdir} -lobs-frontend-api
+Cflags: -I\${includedir}
+EOF
           cd ..
 
-      - name: Fetch and prepare GStreamer 1.22.8 (x64) MinGW SDK
+      - name: Fetch and prepare GStreamer 1.22.12 (x64) MinGW SDK
         run: |
           mkdir -p gst-sdk-win64
           cd gst-sdk-win64
-          wget -q https://gstreamer.freedesktop.org/data/pkg/windows/1.22.8/mingw/gstreamer-1.0-devel-mingw-x86_64-1.22.8.msi
-          msiextract gstreamer-1.0-devel-mingw-x86_64-1.22.8.msi
+          GST_URL="https://gstreamer.freedesktop.org/data/pkg/windows/1.22.12/mingw/gstreamer-1.0-devel-mingw-x86_64-1.22.12.msi"
+          wget -q "$GST_URL" -O gst-devel.msi || wget -q https://gstreamer.freedesktop.org/data/pkg/windows/1.20.7/mingw/gstreamer-1.0-devel-mingw-x86_64-1.20.7.msi -O gst-devel.msi
+          msiextract gst-devel.msi
           
           # Normalize pkg-config paths to current extracted location
           GST_ROOT="$(pwd)/gstreamer/1.0/mingw_x86_64"
@@ -162,20 +221,13 @@ jobs:
 
       - name: Configure Meson build (64-bit x64, Modern Windows target)
         run: |
-          export PKG_CONFIG_LIBDIR="$(pwd)/gst-sdk-win64/gstreamer/1.0/mingw_x86_64/lib/pkgconfig"
-          export PKG_CONFIG_PATH="${PKG_CONFIG_LIBDIR}"
-          export C_INCLUDE_PATH="$(pwd)/obs-sdk-win64/obs-studio-30.2.2/libobs:$(pwd)/obs-sdk-win64/obs-studio-30.2.2/UI/obs-frontend-api"
-          export CPLUS_INCLUDE_PATH="${C_INCLUDE_PATH}"
-          export LIBRARY_PATH="$(pwd)/obs-sdk-win64"
+          export PKG_CONFIG_PATH="$(pwd)/obs-sdk-win64/lib/pkgconfig:$(pwd)/gst-sdk-win64/gstreamer/1.0/mingw_x86_64/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="${PKG_CONFIG_PATH}"
           
           meson setup build-win64 \
             --cross-file cross/x86_64-w64-mingw32.ini \
             --buildtype release \
-            -Dwebrtc=auto \
-            -Dc_args="-I$(pwd)/obs-sdk-win64/obs-studio-30.2.2/libobs" \
-            -Dcpp_args="-I$(pwd)/obs-sdk-win64/obs-studio-30.2.2/libobs -I$(pwd)/obs-sdk-win64/obs-studio-30.2.2/UI/obs-frontend-api" \
-            -Dc_link_args="-L$(pwd)/obs-sdk-win64" \
-            -Dcpp_link_args="-L$(pwd)/obs-sdk-win64"
+            -Dwebrtc=auto
 
       - name: Compile 64-bit Plugin
         run: |
@@ -187,21 +239,21 @@ jobs:
           cp build-win64/obs-gstreamer.dll package-win64/obs-plugins/64bit/
           
           cat << 'EOF' > package-win64/README-INSTALL-OBS30-WIN64.txt
-          =============================================================
-          obs-gstreamer for OBS Studio 28+ / 30+ (64-bit / Windows 10/11)
-          Target: x86_64 (64-bit)
-          =============================================================
+=============================================================
+obs-gstreamer for OBS Studio 28+ / 30+ (64-bit / Windows 10/11)
+Target: x86_64 (64-bit)
+=============================================================
 
-          Prerequisites:
-          1. Official 64-bit GStreamer Runtime (MinGW 1.22.x or MSVC 1.22+ x64):
-             https://gstreamer.freedesktop.org/data/pkg/windows/
-             * Ensure the GStreamer bin folder (e.g. C:\gstreamer\1.0\msvc_x86_64\bin or mingw_x86_64\bin) is in PATH.
-          2. OBS Studio 28, 29, or 30+ (64-bit).
+Prerequisites:
+1. Official 64-bit GStreamer Runtime (MinGW 1.22.x or MSVC 1.22+ x64):
+   https://gstreamer.freedesktop.org/data/pkg/windows/
+   * Ensure the GStreamer bin folder (e.g. C:\gstreamer\1.0\msvc_x86_64\bin or mingw_x86_64\bin) is in PATH.
+2. OBS Studio 28, 29, or 30+ (64-bit).
 
-          Installation:
-          Copy the contents of 'obs-plugins/64bit/obs-gstreamer.dll' into your OBS Studio 64-bit plugin folder:
-          C:\Program Files\obs-studio\obs-plugins\64bit\obs-gstreamer.dll
-          EOF
+Installation:
+Copy 'obs-plugins/64bit/obs-gstreamer.dll' into your OBS Studio 64-bit plugin folder:
+C:\Program Files\obs-studio\obs-plugins\64bit\obs-gstreamer.dll
+EOF
           
           cd package-win64
           zip -r ../obs-gstreamer-obs30-win64.zip ./*

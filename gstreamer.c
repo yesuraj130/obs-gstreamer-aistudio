@@ -38,8 +38,17 @@ extern void gstreamer_output_raw_audio(void *data, struct audio_data *frame);
 extern void gstreamer_output_get_defaults(obs_data_t *settings);
 extern obs_properties_t *gstreamer_output_get_properties(void *data);
 
+#ifndef ENABLE_DOCK
+#define ENABLE_DOCK 1
+#endif
+
+#if ENABLE_DOCK
 extern void gstreamer_dock_register(void);
 extern void gstreamer_dock_unregister(void);
+#else
+static inline void gstreamer_dock_register(void) {}
+static inline void gstreamer_dock_unregister(void) {}
+#endif
 
 bool obs_module_load(void)
 {
