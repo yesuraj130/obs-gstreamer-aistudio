@@ -111,11 +111,29 @@ endif
 
 deps += webrtc_deps
 
+cc = meson.get_compiler('c')
+obs_inc = []
+if not cc.has_header('obs-module.h', dependencies : obs_dep)
+  foreach dir : ['/usr/include/obs', '/usr/local/include/obs']
+    if cc.has_header('obs-module.h', args : ['-I' + dir])
+      obs_inc += include_directories(dir)
+      extra_c_args += ['-I' + dir]
+      break
+    endif
+  endforeach
+endif
+
+shlib_kwargs = {}
+if host_machine.system() == 'darwin'
+  shlib_kwargs += {'name_suffix': 'so'}
+endif
+
 shared_library('obs-gstreamer',
   sources,
   name_prefix : '',
-  name_suffix : name_suffix,
   c_args : extra_c_args,
+  include_directories : obs_inc,
   dependencies : deps,
   install : true,
+  kwargs : shlib_kwargs,
 )

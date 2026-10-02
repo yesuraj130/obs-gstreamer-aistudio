@@ -207,7 +207,7 @@ jobs:
 
       - name: Build with Meson
         run: |
-          meson setup build-linux --buildtype release
+          meson setup build-linux --buildtype release -Dc_args="-I/usr/include/obs" -Dcpp_args="-I/usr/include/obs"
           ninja -C build-linux
 
       - name: Package Linux Plugin
