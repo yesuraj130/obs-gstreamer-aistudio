@@ -23,6 +23,7 @@
 #include <gst/gst.h>
 
 #include "gstreamer-encoder-tex.h"
+#include "gstreamer-render-hub.h"
 
 OBS_DECLARE_MODULE()
 
@@ -84,6 +85,7 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+	gst_render_hub_shutdown();
 	gstreamer_dock_unregister();
 	gstreamer_encoder_tex_unregister();
 	blog(LOG_INFO, "plugin unloaded");

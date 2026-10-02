@@ -1,5 +1,6 @@
 #include <obs.h>
 #include <obs-frontend-api.h>
+#include "gstreamer-render-hub.h"
 
 #include <QApplication>
 #include <QPalette>
@@ -43,6 +44,17 @@
 #endif
 #endif
 
+static const char *DEFAULT_MASTER_PIPELINE =
+	"appsrc name=hub_appsrc is-live=true format=GST_FORMAT_TIME do-timestamp=true "
+	"caps=\"video/x-raw, format=BGRA, width=%u, height=%u, framerate=%u/%u\" ! "
+	"videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast bframes=0 key-int-max=60 bitrate=4000 ! "
+	"h264parse config-interval=-1 ! appsink name=hub_appsink sync=false drop=true max-buffers=1";
+
+static const char *DEFAULT_HUB_RTSP_PIPELINE =
+	"( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true "
+	"caps=\"video/x-h264, stream-format=byte-stream, alignment=au\" ! "
+	"h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 )";
+
 struct gstreamer_output_config {
 	QString name = "Output";
 	QString source_type = "Program Output";
@@ -58,6 +70,7 @@ struct gstreamer_output_config {
 	QString pipeline = "autovideosink sync=false";
 	bool auto_start = true;
 	bool use_gpu_encoder = false;
+	bool use_render_hub = false;
 	QString gpu_encoder_type = "qsvh265enc";
 	QString color_space_mode = "auto_nv12";
 	int bitrate_kbps = 4000;
@@ -65,6 +78,7 @@ struct gstreamer_output_config {
 	obs_encoder_t *encoder = nullptr;
 	obs_view_t *view = nullptr;
 	video_t *video  = nullptr;
+	gst_hub_branch_t *hub_branch = nullptr;
 };
 
 struct gstreamer_dock_state {
@@ -75,6 +89,8 @@ struct gstreamer_dock_state {
 	QToolButton *remove = nullptr;
 	QToolButton *move_up = nullptr;
 	QToolButton *move_down = nullptr;
+	QToolButton *hub_settings = nullptr;
+	QString master_pipeline = DEFAULT_MASTER_PIPELINE;
 	std::vector<gstreamer_output_config> configurations;
 };
 
@@ -205,8 +221,19 @@ static void select_source(gstreamer_output_config &config)
 	}
 }
 
+static bool is_config_active(const gstreamer_output_config &config)
+{
+	if (config.use_render_hub && config.hub_branch)
+		return gst_render_hub_is_branch_active(config.hub_branch);
+	return config.output && obs_output_active(config.output);
+}
+
 static void stop_output(gstreamer_output_config &config)
 {
+	if (config.hub_branch) {
+		gst_render_hub_stop_branch(config.hub_branch);
+		config.hub_branch = nullptr;
+	}
 	if (config.output) {
 		if (obs_output_active(config.output))
 			obs_output_stop(config.output);
@@ -245,6 +272,7 @@ static void save_configurations(const gstreamer_dock_state *state)
 	QSettings settings(profile_settings_path(), QSettings::IniFormat);
 	settings.beginGroup("obs-gstreamer/outputs");
 	settings.remove("");
+	settings.setValue("master_pipeline", state->master_pipeline);
 	settings.setValue("count", static_cast<int>(state->configurations.size()));
 	for (size_t index = 0; index < state->configurations.size(); ++index) {
 		const auto &config = state->configurations[index];
@@ -263,6 +291,7 @@ static void save_configurations(const gstreamer_dock_state *state)
 		settings.setValue("auto_start", config.auto_start);
 		settings.setValue("pipeline", config.pipeline);
 		settings.setValue("use_gpu_encoder", config.use_gpu_encoder);
+		settings.setValue("use_render_hub", config.use_render_hub);
 		settings.setValue("gpu_encoder_type", config.gpu_encoder_type);
 		settings.setValue("color_space_mode", config.color_space_mode);
 		settings.setValue("bitrate_kbps", config.bitrate_kbps);
@@ -275,6 +304,7 @@ static void load_configurations(gstreamer_dock_state *state)
 {
 	QSettings settings(profile_settings_path(), QSettings::IniFormat);
 	settings.beginGroup("obs-gstreamer/outputs");
+	state->master_pipeline = settings.value("master_pipeline", DEFAULT_MASTER_PIPELINE).toString();
 	const int count = settings.value("count", 0).toInt();
 	for (int index = 0; index < count; ++index) {
 		settings.beginGroup(QString::number(index));
@@ -293,6 +323,7 @@ static void load_configurations(gstreamer_dock_state *state)
 		config.auto_start = settings.value("auto_start", config.auto_start).toBool();
 		config.pipeline = settings.value("pipeline", config.pipeline).toString();
 		config.use_gpu_encoder = settings.value("use_gpu_encoder", config.use_gpu_encoder).toBool();
+		config.use_render_hub = settings.value("use_render_hub", config.use_render_hub).toBool();
 		config.gpu_encoder_type = settings.value("gpu_encoder_type", config.gpu_encoder_type).toString();
 		config.color_space_mode = settings.value("color_space_mode", config.color_space_mode).toString();
 		config.bitrate_kbps = settings.value("bitrate_kbps", config.bitrate_kbps).toInt();
@@ -338,6 +369,9 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 	QLineEdit *pipeline = new QLineEdit(config->pipeline);
 	QCheckBox *use_gpu_encoder = new QCheckBox("Zero-Copy GPU Texture Encoder");
 	use_gpu_encoder->setChecked(config->use_gpu_encoder);
+	QCheckBox *use_render_hub = new QCheckBox("Direct GPU Render Hub (ASAP Mode)");
+	use_render_hub->setToolTip("Bypasses OBS output queues and encodes directly from GPU off-screen view with multi-port RTSP branching");
+	use_render_hub->setChecked(config->use_render_hub);
 	QComboBox *gpu_encoder_type = new QComboBox();
 	gpu_encoder_type->addItem("Intel QSV H.265 (qsvh265enc)", "qsvh265enc");
 	gpu_encoder_type->addItem("Intel QSV H.264 (qsvh264enc)", "qsvh264enc");
@@ -362,6 +396,7 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 	left_form->addRow("Output mode", mode);
 	left_form->addRow("RTSP mount", mount);
 	left_form->addRow("RTSP service", service);
+	left_form->addRow("Direct Render Hub", use_render_hub);
 	left_form->addRow("Hardware Encode", use_gpu_encoder);
 	left_form->addRow("HW Encoder", gpu_encoder_type);
 	left_form->addRow("Color Conversion", color_space_mode);
@@ -374,23 +409,39 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 	right_form->addRow(buttons);
 	columns->addWidget(left_panel, 1);
 	columns->addWidget(right_panel, 2);
-	auto update_enabled = [source_type, source, scene, mode, mount, service, rtsp_pipeline, signaling, http_port, web_root, auto_start, pipeline, use_gpu_encoder, gpu_encoder_type, color_space_mode]() {
+	auto update_enabled = [source_type, source, scene, mode, mount, service, rtsp_pipeline, signaling, http_port, web_root, auto_start, pipeline, use_gpu_encoder, use_render_hub, gpu_encoder_type, color_space_mode]() {
 		source->setEnabled(source_type->currentText() == "Source");
 		scene->setEnabled(source_type->currentText() == "Scene");
-		mount->setEnabled(mode->currentText() == "RTSP");
-		service->setEnabled(mode->currentText() == "RTSP");
-		rtsp_pipeline->setEnabled(mode->currentText() == "RTSP");
+		const bool is_hub = use_render_hub->isChecked();
+		if (is_hub) {
+			mode->setCurrentText("RTSP");
+			mode->setEnabled(false);
+			mount->setEnabled(true);
+			service->setEnabled(true);
+			rtsp_pipeline->setEnabled(true);
+		} else {
+			mode->setEnabled(true);
+			mount->setEnabled(mode->currentText() == "RTSP");
+			service->setEnabled(mode->currentText() == "RTSP");
+			rtsp_pipeline->setEnabled(mode->currentText() == "RTSP");
+		}
 		signaling->setEnabled(false);
-		http_port->setEnabled(mode->currentText() == "WebRTC");
-		web_root->setEnabled(mode->currentText() == "WebRTC");
+		http_port->setEnabled(!is_hub && mode->currentText() == "WebRTC");
+		web_root->setEnabled(!is_hub && mode->currentText() == "WebRTC");
 		auto_start->setEnabled(true);
-		pipeline->setEnabled(mode->currentText() == "Pipeline");
-		gpu_encoder_type->setEnabled(use_gpu_encoder->isChecked());
-		color_space_mode->setEnabled(use_gpu_encoder->isChecked());
+		pipeline->setEnabled(!is_hub && mode->currentText() == "Pipeline");
+		gpu_encoder_type->setEnabled(is_hub || use_gpu_encoder->isChecked());
+		color_space_mode->setEnabled(!is_hub && use_gpu_encoder->isChecked());
 	};
 	QObject::connect(source_type, &QComboBox::currentTextChanged, update_enabled);
 	QObject::connect(mode, &QComboBox::currentTextChanged, update_enabled);
 	QObject::connect(use_gpu_encoder, &QCheckBox::toggled, update_enabled);
+	QObject::connect(use_render_hub, &QCheckBox::toggled, update_enabled);
+	QObject::connect(use_render_hub, &QCheckBox::toggled, [rtsp_pipeline](bool checked) {
+		if (checked && (rtsp_pipeline->toPlainText().trimmed().isEmpty() || rtsp_pipeline->toPlainText().contains("x264enc"))) {
+			rtsp_pipeline->setPlainText(DEFAULT_HUB_RTSP_PIPELINE);
+		}
+	});
 	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 	update_enabled();
@@ -410,6 +461,7 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 	config->auto_start = auto_start->isChecked();
 	config->pipeline = pipeline->text();
 	config->use_gpu_encoder = use_gpu_encoder->isChecked();
+	config->use_render_hub = use_render_hub->isChecked();
 	config->gpu_encoder_type = gpu_encoder_type->currentData().toString();
 	config->color_space_mode = color_space_mode->currentData().toString();
 	if (config->name.isEmpty())
@@ -426,16 +478,22 @@ static void refresh_rows(gstreamer_dock_state *state)
 	state->outputs->clear();
 	for (size_t index = 0; index < state->configurations.size(); ++index) {
 		const auto &config = state->configurations[index];
-		const QString status = config.output && obs_output_active(config.output) ? "Running" : "Stopped";
+		const bool running = is_config_active(config);
+		const QString status = running ? "Running" : "Stopped";
 		QListWidgetItem *item = new QListWidgetItem(state->outputs);
 		QWidget *row_widget = new QWidget(state->outputs);
 		row_widget->setStyleSheet("QLabel { color: palette(WindowText); }");
 		QHBoxLayout *row_layout = new QHBoxLayout(row_widget);
 		row_layout->setContentsMargins(8, 2, 8, 2);
 		row_layout->setSpacing(6);
-		QString label_text = config.use_gpu_encoder ?
-			QString("%1 [GPU: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status) :
-			QString("%1  [%2]").arg(config.name, status);
+		QString label_text;
+		if (config.use_render_hub) {
+			label_text = QString("%1 [Direct GPU Hub: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status);
+		} else if (config.use_gpu_encoder) {
+			label_text = QString("%1 [GPU: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status);
+		} else {
+			label_text = QString("%1  [%2]").arg(config.name, status);
+		}
 		QLabel *label = new QLabel(label_text);
 		QPushButton *start = new QPushButton("Start");
 		QPushButton *stop = new QPushButton("Stop");
@@ -444,7 +502,6 @@ static void refresh_rows(gstreamer_dock_state *state)
 		label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 		start->setToolTip("Start output");
 		stop->setToolTip("Stop output");
-		const bool running = config.output && obs_output_active(config.output);
 		start->setEnabled(!running);
 		stop->setEnabled(running);
 		label->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
@@ -458,6 +515,12 @@ static void refresh_rows(gstreamer_dock_state *state)
 	}
 	if (!state->configurations.empty())
 		state->outputs->setCurrentRow(qBound(0, selected, state->outputs->count() - 1));
+
+	const int cur = state->outputs->currentRow();
+	const bool cur_running = (cur >= 0 && cur < static_cast<int>(state->configurations.size())) ?
+		is_config_active(state->configurations[cur]) : false;
+	state->edit->setEnabled(!cur_running);
+	state->remove->setEnabled(!cur_running);
 }
 
 static void start_selected(gstreamer_dock_state *state, int row)
@@ -465,6 +528,26 @@ static void start_selected(gstreamer_dock_state *state, int row)
 	if (row < 0 || row >= static_cast<int>(state->configurations.size())) return;
 	gstreamer_output_config &config = state->configurations[row];
 	stop_output(config);
+
+	if (config.use_render_hub) {
+		gst_hub_output_params_t params = {};
+		params.name = config.name.toUtf8().constData();
+		params.source_type = config.source_type.toUtf8().constData();
+		params.source_name = (config.source_type == "Scene") ? config.scene_name.toUtf8().constData() : config.source_name.toUtf8().constData();
+		params.rtsp_service = config.rtsp_service.toUtf8().constData();
+		params.rtsp_mount = config.rtsp_mount.toUtf8().constData();
+		params.encoder_type = config.gpu_encoder_type.toUtf8().constData();
+		params.bitrate_kbps = config.bitrate_kbps > 0 ? config.bitrate_kbps : 4000;
+		params.keyint_sec = 1;
+		params.master_pipeline = state->master_pipeline.toUtf8().constData();
+		params.rtsp_pipeline = config.rtsp_pipeline.toUtf8().constData();
+
+		config.hub_branch = gst_render_hub_start_branch(&params);
+		refresh_rows(state);
+		save_configurations(state);
+		return;
+	}
+
 	obs_data_t *settings = output_settings(config);
 	config.output = obs_output_create("hjm-gstreamer-output", config.name.toUtf8().constData(), settings, nullptr);
 	obs_data_release(settings);
@@ -495,6 +578,47 @@ static void stop_selected(gstreamer_dock_state *state, int row)
 	if (row >= 0 && row < static_cast<int>(state->configurations.size()))
 		stop_output(state->configurations[row]);
 	refresh_rows(state);
+}
+
+static void edit_master_pipeline(QWidget *parent, gstreamer_dock_state *state)
+{
+	QDialog dialog(parent);
+	dialog.setWindowTitle("Direct GPU Hub - Master Pipeline Configuration");
+	dialog.resize(720, 380);
+	QVBoxLayout *layout = new QVBoxLayout(&dialog);
+
+	QLabel *info = new QLabel(
+		"<b>Master GPU Encoder Pipeline (Runs once in VRAM, feeds all RTSP branches):</b><br>"
+		"• Ingestion element: <code>appsrc name=hub_appsrc</code> (Format: BGRA)<br>"
+		"• Codec output element: <code>appsink name=hub_appsink</code> (Format: H.264 byte-stream)<br>"
+		"• Placeholders: <code>%u</code> for width, height, fps_num, fps_den.",
+		&dialog);
+	info->setWordWrap(true);
+	layout->addWidget(info);
+
+	QPlainTextEdit *editor = new QPlainTextEdit(&dialog);
+	editor->setPlainText(state->master_pipeline);
+	layout->addWidget(editor, 1);
+
+	QHBoxLayout *btn_row = new QHBoxLayout();
+	QPushButton *reset_btn = new QPushButton("Reset to Default", &dialog);
+	QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+
+	btn_row->addWidget(reset_btn);
+	btn_row->addStretch();
+	btn_row->addWidget(box);
+	layout->addLayout(btn_row);
+
+	QObject::connect(reset_btn, &QPushButton::clicked, [editor]() {
+		editor->setPlainText(DEFAULT_MASTER_PIPELINE);
+	});
+	QObject::connect(box, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+	QObject::connect(box, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+	if (dialog.exec() == QDialog::Accepted) {
+		state->master_pipeline = editor->toPlainText().trimmed();
+		save_configurations(state);
+	}
 }
 
 static QWidget *create_gstreamer_dock_widget(void)
@@ -538,13 +662,19 @@ static QWidget *create_gstreamer_dock_widget(void)
 	state->move_down->setIcon(obs_theme_icon("down"));
 	state->move_down->setIconSize(QSize(16, 16));
 	state->move_down->setToolTip("Move output down");
-	for (QToolButton *button : {state->add, state->edit, state->remove, state->move_up, state->move_down})
+	state->hub_settings = new QToolButton();
+	state->hub_settings->setAutoRaise(true);
+	state->hub_settings->setIcon(obs_theme_icon("settings"));
+	state->hub_settings->setIconSize(QSize(16, 16));
+	state->hub_settings->setToolTip("Direct GPU Hub: Configure Master Pipeline");
+	for (QToolButton *button : {state->add, state->edit, state->remove, state->move_up, state->move_down, state->hub_settings})
 		button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	manage->addWidget(state->add);
 	manage->addWidget(state->edit);
 	manage->addWidget(state->remove);
 	manage->addWidget(state->move_up);
 	manage->addWidget(state->move_down);
+	manage->addWidget(state->hub_settings);
 	manage->addStretch();
 	layout->addLayout(manage);
 	load_configurations(state);
@@ -574,10 +704,23 @@ static QWidget *create_gstreamer_dock_widget(void)
 	});
 	QObject::connect(state->edit, &QPushButton::clicked, [state]() {
 		const int row = state->outputs->currentRow();
-		if (row >= 0 && edit_configuration(state->widget, &state->configurations[row])) {
-			refresh_rows(state);
-			save_configurations(state);
+		if (row >= 0) {
+			if (is_config_active(state->configurations[row]))
+				return;
+			if (edit_configuration(state->widget, &state->configurations[row])) {
+				refresh_rows(state);
+				save_configurations(state);
+			}
 		}
+	});
+	QObject::connect(state->hub_settings, &QPushButton::clicked, [state]() {
+		edit_master_pipeline(state->widget, state);
+	});
+	QObject::connect(state->outputs, &QListWidget::currentRowChanged, [state](int row) {
+		const bool cur_running = (row >= 0 && row < static_cast<int>(state->configurations.size())) ?
+			is_config_active(state->configurations[row]) : false;
+		state->edit->setEnabled(!cur_running);
+		state->remove->setEnabled(!cur_running);
 	});
 	QObject::connect(state->remove, &QPushButton::clicked, [state]() {
 		const int row = state->outputs->currentRow();

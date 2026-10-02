@@ -80,6 +80,7 @@ sources = [
   'gstreamer-source.c',
   'gstreamer-encoder.c',
   'gstreamer-encoder-tex.c',
+  'gstreamer-render-hub.c',
   'gstreamer-filter.c',
   'gstreamer-output.c',
   'gstreamer-webrtc.c',
