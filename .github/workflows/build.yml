@@ -186,23 +186,24 @@ jobs:
           path: obs-gstreamer-obs30-win64.zip
 
   # =========================================================================
-  # Target 3: Linux (x86_64) Native
+  # Target 3: Linux (x86_64) Native (Latest OBS Studio 30+)
   # =========================================================================
   build-linux:
-    name: "Linux (64-bit x86_64)"
-    runs-on: ubuntu-22.04
+    name: "Linux (64-bit x86_64, OBS 30+)"
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install dependencies (Latest OBS 30+ & GStreamer)
         run: |
+          sudo add-apt-repository -y ppa:obsproject/obs-studio
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential ninja-build python3-pip pkg-config \
             libobs-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
-            libsoup-3.0-dev qtbase5-dev
+            libsoup-3.0-dev qt6-base-dev qtbase5-dev
           pip3 install --upgrade meson
 
       - name: Build with Meson
