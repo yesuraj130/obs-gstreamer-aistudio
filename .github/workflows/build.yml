@@ -50,29 +50,8 @@ jobs:
           i686-w64-mingw32-dlltool -d obs-frontend-api.def -l libobs-frontend-api.dll.a -D obs-frontend-api.dll
 
           SDK_DIR="$(pwd)"
-          cat << EOF > lib/pkgconfig/libobs.pc
-prefix=${SDK_DIR}
-libdir=${SDK_DIR}
-includedir=${SDK_DIR}/include
-
-Name: libobs
-Description: OBS Studio library
-Version: 27.2.4
-Libs: -L\${libdir} -lobs
-Cflags: -I\${includedir}
-EOF
-
-          cat << EOF > lib/pkgconfig/obs-frontend-api.pc
-prefix=${SDK_DIR}
-libdir=${SDK_DIR}
-includedir=${SDK_DIR}/include
-
-Name: obs-frontend-api
-Description: OBS Studio Frontend API library
-Version: 27.2.4
-Libs: -L\${libdir} -lobs-frontend-api
-Cflags: -I\${includedir}
-EOF
+          printf "prefix=%s\nlibdir=%s\nincludedir=%s/include\n\nName: libobs\nDescription: OBS Studio library\nVersion: 27.2.4\nLibs: -L\${libdir} -lobs\nCflags: -I\${includedir}\n" "$SDK_DIR" "$SDK_DIR" "$SDK_DIR" > lib/pkgconfig/libobs.pc
+          printf "prefix=%s\nlibdir=%s\nincludedir=%s/include\n\nName: obs-frontend-api\nDescription: OBS Studio Frontend API library\nVersion: 27.2.4\nLibs: -L\${libdir} -lobs-frontend-api\nCflags: -I\${includedir}\n" "$SDK_DIR" "$SDK_DIR" "$SDK_DIR" > lib/pkgconfig/obs-frontend-api.pc
           cd ..
 
       - name: Fetch and prepare GStreamer (x86) MinGW SDK
@@ -106,29 +85,7 @@ EOF
         run: |
           mkdir -p package-win32/obs-plugins/32bit
           cp build-win32/obs-gstreamer.dll package-win32/obs-plugins/32bit/
-          
-          cat << 'EOF' > package-win32/README-INSTALL-OBS27-WIN32.txt
-=============================================================
-obs-gstreamer for OBS Studio 27.2.4 (32-bit / Windows 7 SP1)
-Target: x86 (32-bit), Intel Core i3-3217U / Ivy Bridge HD 4000
-=============================================================
-
-Prerequisites:
-1. Windows 7 SP1 with KB4474419 (SHA-2) and Universal CRT (KB2999226).
-2. Official 32-bit GStreamer Runtime (MinGW version 1.18.6 or 1.20.7 x86):
-   https://gstreamer.freedesktop.org/data/pkg/windows/1.18.6/mingw/gstreamer-1.0-mingw-x86-1.18.6.msi
-   * Ensure the GStreamer bin folder (e.g. C:\gstreamer\1.0\mingw_x86\bin) is added to your Windows PATH.
-3. OBS Studio 27.2.4 (32-bit):
-   https://github.com/obsproject/obs-studio/releases/tag/27.2.4
-
-Installation:
-Copy 'obs-plugins/32bit/obs-gstreamer.dll' into your OBS Studio 32-bit plugin folder:
-C:\Program Files (x86)\obs-studio\obs-plugins\32bit\obs-gstreamer.dll
-
-Performance Tips for Intel Core i3-3217U:
-- Set OBS canvas and output to 1280x720 @ 30 FPS.
-- Use Intel Quick Sync hardware elements (qsvh264dec / qsvh264enc) for low CPU usage.
-EOF
+          cp docs/README-INSTALL-OBS27-WIN32.txt package-win32/README-INSTALL.txt
           
           cd package-win32
           zip -r ../obs-gstreamer-obs27-win32.zip ./*
@@ -181,29 +138,8 @@ EOF
           x86_64-w64-mingw32-dlltool -d obs-frontend-api.def -l libobs-frontend-api.dll.a -D obs-frontend-api.dll
 
           SDK_DIR="$(pwd)"
-          cat << EOF > lib/pkgconfig/libobs.pc
-prefix=${SDK_DIR}
-libdir=${SDK_DIR}
-includedir=${SDK_DIR}/include
-
-Name: libobs
-Description: OBS Studio library
-Version: 30.2.2
-Libs: -L\${libdir} -lobs
-Cflags: -I\${includedir}
-EOF
-
-          cat << EOF > lib/pkgconfig/obs-frontend-api.pc
-prefix=${SDK_DIR}
-libdir=${SDK_DIR}
-includedir=${SDK_DIR}/include
-
-Name: obs-frontend-api
-Description: OBS Studio Frontend API library
-Version: 30.2.2
-Libs: -L\${libdir} -lobs-frontend-api
-Cflags: -I\${includedir}
-EOF
+          printf "prefix=%s\nlibdir=%s\nincludedir=%s/include\n\nName: libobs\nDescription: OBS Studio library\nVersion: 30.2.2\nLibs: -L\${libdir} -lobs\nCflags: -I\${includedir}\n" "$SDK_DIR" "$SDK_DIR" "$SDK_DIR" > lib/pkgconfig/libobs.pc
+          printf "prefix=%s\nlibdir=%s\nincludedir=%s/include\n\nName: obs-frontend-api\nDescription: OBS Studio Frontend API library\nVersion: 30.2.2\nLibs: -L\${libdir} -lobs-frontend-api\nCflags: -I\${includedir}\n" "$SDK_DIR" "$SDK_DIR" "$SDK_DIR" > lib/pkgconfig/obs-frontend-api.pc
           cd ..
 
       - name: Fetch and prepare GStreamer 1.22.12 (x64) MinGW SDK
@@ -237,23 +173,7 @@ EOF
         run: |
           mkdir -p package-win64/obs-plugins/64bit
           cp build-win64/obs-gstreamer.dll package-win64/obs-plugins/64bit/
-          
-          cat << 'EOF' > package-win64/README-INSTALL-OBS30-WIN64.txt
-=============================================================
-obs-gstreamer for OBS Studio 28+ / 30+ (64-bit / Windows 10/11)
-Target: x86_64 (64-bit)
-=============================================================
-
-Prerequisites:
-1. Official 64-bit GStreamer Runtime (MinGW 1.22.x or MSVC 1.22+ x64):
-   https://gstreamer.freedesktop.org/data/pkg/windows/
-   * Ensure the GStreamer bin folder (e.g. C:\gstreamer\1.0\msvc_x86_64\bin or mingw_x86_64\bin) is in PATH.
-2. OBS Studio 28, 29, or 30+ (64-bit).
-
-Installation:
-Copy 'obs-plugins/64bit/obs-gstreamer.dll' into your OBS Studio 64-bit plugin folder:
-C:\Program Files\obs-studio\obs-plugins\64bit\obs-gstreamer.dll
-EOF
+          cp docs/README-INSTALL-OBS30-WIN64.txt package-win64/README-INSTALL.txt
           
           cd package-win64
           zip -r ../obs-gstreamer-obs30-win64.zip ./*
