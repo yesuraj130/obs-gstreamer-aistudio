@@ -1,6 +1,8 @@
 #include <obs.h>
 #include <obs-frontend-api.h>
 
+#include <QApplication>
+#include <QPalette>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QDialog>
@@ -27,6 +29,19 @@
 #include <QDockWidget>
 
 #include <vector>
+
+#ifndef MAKE_SEMANTIC_VERSION
+#define MAKE_SEMANTIC_VERSION(maj, min, patch) \
+	((((maj) & 0xFF) << 24) | (((min) & 0xFF) << 16) | ((patch) & 0xFFFF))
+#endif
+
+#ifndef LIBOBS_API_VER
+#if defined(LIBOBS_API_MAJOR_VER) && defined(LIBOBS_API_MINOR_VER) && defined(LIBOBS_API_PATCH_VER)
+#define LIBOBS_API_VER MAKE_SEMANTIC_VERSION(LIBOBS_API_MAJOR_VER, LIBOBS_API_MINOR_VER, LIBOBS_API_PATCH_VER)
+#else
+#define LIBOBS_API_VER 0
+#endif
+#endif
 
 struct gstreamer_output_config {
 	QString name = "Output";
@@ -102,7 +117,14 @@ static QStringList scene_names(void)
 
 static QIcon obs_theme_icon(const QString &name)
 {
+#if defined(LIBOBS_API_VER) && LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(28, 0, 0)
 	const char *theme = obs_frontend_is_theme_dark() ? "Dark" : "Light";
+#else
+	bool is_dark = true;
+	if (qApp && qApp->palette().color(QPalette::Window).lightness() > 128)
+		is_dark = false;
+	const char *theme = is_dark ? "Dark" : "Light";
+#endif
 	const QString rel = QString("themes/%1/%2.svg").arg(theme, name);
 	char *path = obs_find_data_file(rel.toUtf8().constData());
 	if (path) {
@@ -131,7 +153,9 @@ static void select_source(gstreamer_output_config &config)
 {
 	if (config.view) 
 	{
+#if defined(LIBOBS_API_VER) && LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(28, 0, 0)
 		obs_view_remove(config.view);
+#endif
 		obs_view_destroy(config.view);
 		config.view = nullptr;
 		config.video = nullptr;
@@ -147,7 +171,11 @@ static void select_source(gstreamer_output_config &config)
 
 		config.view = obs_view_create();
 		obs_view_set_source(config.view, 0, source);
+#if defined(LIBOBS_API_VER) && LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(28, 0, 0)
 		config.video = obs_view_add(config.view);
+#else
+		config.video = obs_get_video();
+#endif
 		obs_output_set_media(config.output, config.video, obs_get_audio());
 
 		obs_source_release(source);
@@ -165,7 +193,11 @@ static void select_source(gstreamer_output_config &config)
 
 		config.view = obs_view_create();
 		obs_view_set_source(config.view, 0, source);
+#if defined(LIBOBS_API_VER) && LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(28, 0, 0)
 		config.video = obs_view_add(config.view);
+#else
+		config.video = obs_get_video();
+#endif
 		obs_output_set_media(config.output, config.video, obs_get_audio());
 
 		obs_source_release(source);
