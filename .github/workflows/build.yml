@@ -239,19 +239,44 @@ jobs:
           New-Item -ItemType Directory -Force -Path "obs-sdk\include\obs" | Out-Null
           New-Item -ItemType Directory -Force -Path "obs-sdk\lib\pkgconfig" | Out-Null
 
-          Write-Host "Downloading OBS Studio $obs_version Windows binary..."
-          Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/releases/download/$obs_version/OBS-Studio-$obs_version-Windows.zip" -OutFile "obs-bin.zip"
+          # Support modern OBS 31/32+ asset naming (-Windows-x64.zip) and legacy OBS 30 (-Windows.zip)
+          $bin_urls = @(
+            "https://github.com/obsproject/obs-studio/releases/download/$obs_version/OBS-Studio-$obs_version-Windows-x64.zip",
+            "https://github.com/obsproject/obs-studio/releases/download/$obs_version/OBS-Studio-$obs_version-Windows.zip"
+          )
+          $downloaded = $false
+          foreach ($url in $bin_urls) {
+            try {
+              Write-Host "Downloading OBS Studio $obs_version Windows binary from $url..."
+              Invoke-WebRequest -Uri $url -OutFile "obs-bin.zip" -UseBasicParsing -ErrorAction Stop
+              $downloaded = $true
+              break
+            } catch {
+              Write-Host "Candidate URL not found: $url"
+            }
+          }
+          if (!$downloaded) {
+            Write-Error "Failed to download OBS Studio $obs_version Windows binary from release assets."
+            exit 1
+          }
+
           Expand-Archive -Path "obs-bin.zip" -DestinationPath "obs-bin"
 
           Write-Host "Downloading OBS Studio $obs_version source headers..."
           Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/archive/refs/tags/$obs_version.zip" -OutFile "obs-src.zip"
           Expand-Archive -Path "obs-src.zip" -DestinationPath "obs-src"
 
-          # Provide headers
+          # Provide headers (supports modern frontend/api and legacy UI/obs-frontend-api)
           Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\libobs\*" "obs-sdk\include\obs\"
-          Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\UI\obs-frontend-api\*" "obs-sdk\include\obs\"
           Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\libobs\*" "obs-sdk\include\"
-          Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\UI\obs-frontend-api\*" "obs-sdk\include\"
+          if (Test-Path "obs-src\obs-studio-$obs_version\frontend\api") {
+            Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\frontend\api\*" "obs-sdk\include\obs\"
+            Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\frontend\api\*" "obs-sdk\include\"
+          }
+          if (Test-Path "obs-src\obs-studio-$obs_version\UI\obs-frontend-api") {
+            Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\UI\obs-frontend-api\*" "obs-sdk\include\obs\"
+            Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\UI\obs-frontend-api\*" "obs-sdk\include\"
+          }
 
           # Generate MSVC import library for obs.dll
           "EXPORTS" | Out-File -FilePath "obs.def" -Encoding ascii
