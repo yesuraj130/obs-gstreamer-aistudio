@@ -317,13 +317,16 @@ jobs:
           & $env:PKG_CONFIG --modversion gstreamer-1.0
 
           $sdkIncludeFwd = $sdkFullPath.Replace('\', '/')
+          $qtFwd = if ($env:QTDIR) { $env:QTDIR.Replace('\', '/') } else { "" }
+          $qtArgs = if ($qtFwd) { "-I$qtFwd/include -I$qtFwd/include/QtCore -I$qtFwd/include/QtGui -I$qtFwd/include/QtWidgets" } else { "" }
+
           meson setup build-win64 `
             --buildtype release `
             -Dcpp_std=c++17 `
             -Dwebrtc=disabled `
             -Dpkg_config_path="$sdkPkgFwd,$gstPkgFwd" `
             -Dc_args="-I$sdkIncludeFwd/include -I$sdkIncludeFwd/include/obs" `
-            -Dcpp_args="-I$sdkIncludeFwd/include -I$sdkIncludeFwd/include/obs"
+            -Dcpp_args="-I$sdkIncludeFwd/include -I$sdkIncludeFwd/include/obs $qtArgs"
           ninja -C build-win64
 
       - name: Package OBS 30+ (64-bit Win10/11) Release Archive

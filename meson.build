@@ -48,10 +48,10 @@ if host_machine.system() == 'darwin'
 endif
 
 qt6 = import('qt6', required : false)
-qt_dep = dependency('qt6', modules : ['Widgets'], required : false)
+qt_dep = dependency('qt6', modules : ['Core', 'Gui', 'Widgets'], required : false)
 if not qt_dep.found()
   qt5 = import('qt5', required : false)
-  qt_dep = dependency('qt5', modules : ['Widgets'], required : false)
+  qt_dep = dependency('qt5', modules : ['Core', 'Gui', 'Widgets'], required : false)
 endif
 
 webrtc_opt = get_option('webrtc')
