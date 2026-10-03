@@ -139,9 +139,16 @@ static void *gstreamer_tex_encoder_create_internal(obs_data_t *settings, obs_enc
 	g_free(encoder_elem);
 
 	GError *error = NULL;
+	blog(LOG_INFO, "[obs-gstreamer-tex] Creating hardware texture encoder: type=%s, %dx%d @ %d/%d fps, bitrate=%d kbps, gop=%d s, format=%s (%s)",
+		encoder_type ? encoder_type : "default",
+		data->ovi.output_width, data->ovi.output_height,
+		data->ovi.fps_num, data->ovi.fps_den,
+		bitrate, keyint, gst_format, is_h265 ? "H.265" : "H.264");
+	blog(LOG_INFO, "[obs-gstreamer-tex] Primary pipeline: %s", pipe_desc);
+
 	data->pipe = gst_parse_launch(pipe_desc, &error);
 	if (error) {
-		blog(LOG_WARNING, "[obs-gstreamer-tex] Hardware pipeline with memory feature failed (%s), falling back to raw appsrc",
+		blog(LOG_WARNING, "[obs-gstreamer-tex] Hardware pipeline with memory feature failed: %s. Attempting fallback pipeline...",
 			error->message);
 		g_clear_error(&error);
 
@@ -154,10 +161,11 @@ static void *gstreamer_tex_encoder_create_internal(obs_data_t *settings, obs_enc
 			data->ovi.fps_num, data->ovi.fps_den,
 			(is_h265 ? "qsvh265enc" : "qsvh264enc"), parser);
 
+		blog(LOG_INFO, "[obs-gstreamer-tex] Fallback pipeline: %s", fallback_pipe);
 		data->pipe = gst_parse_launch(fallback_pipe, &error);
 		g_free(fallback_pipe);
 		if (error) {
-			blog(LOG_ERROR, "[obs-gstreamer-tex] Failed to initialize pipeline: %s", error->message);
+			blog(LOG_ERROR, "[obs-gstreamer-tex] Failed to initialize fallback pipeline: %s", error->message);
 			g_clear_error(&error);
 			g_free(pipe_desc);
 			g_free(data);
@@ -169,9 +177,24 @@ static void *gstreamer_tex_encoder_create_internal(obs_data_t *settings, obs_enc
 	data->appsrc = gst_bin_get_by_name(GST_BIN(data->pipe), "appsrc");
 	data->appsink = gst_bin_get_by_name(GST_BIN(data->pipe), "appsink");
 
-	gst_element_set_state(data->pipe, GST_STATE_PLAYING);
-	blog(LOG_INFO, "[obs-gstreamer-tex] Hardware texture encoder started (format=%s, %s)",
-		gst_format, is_h265 ? "H.265" : "H.264");
+	if (!data->appsrc || !data->appsink) {
+		blog(LOG_ERROR, "[obs-gstreamer-tex] Failed to find appsrc (%p) or appsink (%p) in pipeline",
+			(void *)data->appsrc, (void *)data->appsink);
+		if (data->appsink) gst_object_unref(data->appsink);
+		if (data->appsrc) gst_object_unref(data->appsrc);
+		gst_element_set_state(data->pipe, GST_STATE_NULL);
+		gst_object_unref(data->pipe);
+		g_free(data);
+		return NULL;
+	}
+
+	GstStateChangeReturn state_ret = gst_element_set_state(data->pipe, GST_STATE_PLAYING);
+	if (state_ret == GST_STATE_CHANGE_FAILURE) {
+		blog(LOG_ERROR, "[obs-gstreamer-tex] Pipeline failed to change state to PLAYING (state_ret=%d)", state_ret);
+	} else {
+		blog(LOG_INFO, "[obs-gstreamer-tex] Hardware texture encoder started successfully (format=%s, %s, state_ret=%d)",
+			gst_format, is_h265 ? "H.265" : "H.264", state_ret);
+	}
 
 	return data;
 }
@@ -192,6 +215,9 @@ static void gstreamer_tex_encoder_destroy(void *p)
 	if (!data)
 		return;
 
+	blog(LOG_INFO, "[obs-gstreamer-tex] Destroying hardware texture encoder (total frames processed: %llu)",
+		(unsigned long long)data->frame_count);
+
 	if (data->pipe) {
 		gst_element_set_state(data->pipe, GST_STATE_NULL);
 		if (data->appsink) gst_object_unref(data->appsink);
@@ -207,6 +233,7 @@ static void gstreamer_tex_encoder_destroy(void *p)
 
 	g_free(data->codec_data);
 	g_free(data);
+	blog(LOG_INFO, "[obs-gstreamer-tex] Hardware texture encoder destroyed cleanly");
 }
 
 static bool gstreamer_tex_encoder_encode(void *p, uint32_t handle,
@@ -228,6 +255,13 @@ static bool gstreamer_tex_encoder_encode(void *p, uint32_t handle,
 	}
 
 	data->frame_count++;
+	if (data->frame_count == 1) {
+		blog(LOG_INFO, "[obs-gstreamer-tex] First frame encode request: handle=0x%x, lock_key=%llu, pts=%lld",
+			handle, (unsigned long long)lock_key, (long long)pts);
+	} else if (data->frame_count % 300 == 0) {
+		blog(LOG_INFO, "[obs-gstreamer-tex] Frame %llu processed (pts=%lld)",
+			(unsigned long long)data->frame_count, (long long)pts);
+	}
 
 #ifdef _WIN32
 	// Windows D3D11 Keyed Mutex synchronization
@@ -252,6 +286,7 @@ static bool gstreamer_tex_encoder_encode(void *p, uint32_t handle,
 	*received_packet = true;
 	GstBuffer *out_buffer = gst_sample_get_buffer(data->sample);
 	if (!gst_buffer_map(out_buffer, &data->info, GST_MAP_READ)) {
+		blog(LOG_ERROR, "[obs-gstreamer-tex] Failed to map encoded buffer from appsink");
 		gst_sample_unref(data->sample);
 		data->sample = NULL;
 		*received_packet = false;
@@ -264,6 +299,7 @@ static bool gstreamer_tex_encoder_encode(void *p, uint32_t handle,
 		if (data->codec_data) {
 			memcpy(data->codec_data, data->info.data, data->info.size);
 			data->codec_data_size = data->info.size;
+			blog(LOG_INFO, "[obs-gstreamer-tex] Cached codec extra data header (%zu bytes)", data->codec_data_size);
 		}
 	}
 
@@ -273,6 +309,11 @@ static bool gstreamer_tex_encoder_encode(void *p, uint32_t handle,
 	packet->dts = pts;
 	packet->type = OBS_ENCODER_VIDEO;
 	packet->keyframe = !GST_BUFFER_FLAG_IS_SET(out_buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+
+	if (data->frame_count == 1 || (data->codec_data && data->frame_count <= 3)) {
+		blog(LOG_INFO, "[obs-gstreamer-tex] Encoded packet produced: size=%zu bytes, keyframe=%d, pts=%lld",
+			packet->size, packet->keyframe ? 1 : 0, (long long)packet->pts);
+	}
 
 	return true;
 }

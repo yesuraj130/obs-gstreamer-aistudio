@@ -207,6 +207,8 @@ void *gstreamer_encoder_create_h264(obs_data_t *settings,
 		data->ovi.fps_num, data->ovi.fps_den, encoder_string,
 		obs_data_get_string(data->settings, "extra_options"));
 
+	blog(LOG_INFO, "[obs-gstreamer-encoder] Launching H.264 encoder pipeline: %s", pipe_string);
+
 	GError *err = NULL;
 
 	data->pipe = gst_parse_launch(pipe_string, &err);
@@ -215,7 +217,7 @@ void *gstreamer_encoder_create_h264(obs_data_t *settings,
 	g_free(pipe_string);
 
 	if (err != NULL) {
-		blog(LOG_ERROR, "%s", err->message);
+		blog(LOG_ERROR, "[obs-gstreamer-encoder] H.264 pipeline creation failed: %s", err->message);
 		g_error_free(err);
 		g_free(data);
 		return NULL;
@@ -224,7 +226,19 @@ void *gstreamer_encoder_create_h264(obs_data_t *settings,
 	data->appsrc = gst_bin_get_by_name(GST_BIN(data->pipe), "appsrc");
 	data->appsink = gst_bin_get_by_name(GST_BIN(data->pipe), "appsink");
 
+	if (!data->appsrc || !data->appsink) {
+		blog(LOG_ERROR, "[obs-gstreamer-encoder] Failed to locate appsrc (%p) or appsink (%p) in H.264 pipeline",
+			(void *)data->appsrc, (void *)data->appsink);
+		if (data->appsink) gst_object_unref(data->appsink);
+		if (data->appsrc) gst_object_unref(data->appsrc);
+		gst_element_set_state(data->pipe, GST_STATE_NULL);
+		gst_object_unref(data->pipe);
+		g_free(data);
+		return NULL;
+	}
+
 	gst_element_set_state(data->pipe, GST_STATE_PLAYING);
+	blog(LOG_INFO, "[obs-gstreamer-encoder] H.264 encoder pipeline started successfully");
 
 	return data;
 }
@@ -296,6 +310,8 @@ void *gstreamer_encoder_create_h265(obs_data_t *settings,
 		data->ovi.fps_num, data->ovi.fps_den, encoder_string,
 		obs_data_get_string(data->settings, "extra_options"));
 
+	blog(LOG_INFO, "[obs-gstreamer-encoder] Launching H.265 encoder pipeline: %s", pipe_string);
+
 	GError *err = NULL;
 
 	data->pipe = gst_parse_launch(pipe_string, &err);
@@ -304,7 +320,7 @@ void *gstreamer_encoder_create_h265(obs_data_t *settings,
 	g_free(pipe_string);
 
 	if (err != NULL) {
-		blog(LOG_ERROR, "%s", err->message);
+		blog(LOG_ERROR, "[obs-gstreamer-encoder] H.265 pipeline creation failed: %s", err->message);
 		g_error_free(err);
 		g_free(data);
 		return NULL;
@@ -313,7 +329,19 @@ void *gstreamer_encoder_create_h265(obs_data_t *settings,
 	data->appsrc = gst_bin_get_by_name(GST_BIN(data->pipe), "appsrc");
 	data->appsink = gst_bin_get_by_name(GST_BIN(data->pipe), "appsink");
 
+	if (!data->appsrc || !data->appsink) {
+		blog(LOG_ERROR, "[obs-gstreamer-encoder] Failed to locate appsrc (%p) or appsink (%p) in H.265 pipeline",
+			(void *)data->appsrc, (void *)data->appsink);
+		if (data->appsink) gst_object_unref(data->appsink);
+		if (data->appsrc) gst_object_unref(data->appsrc);
+		gst_element_set_state(data->pipe, GST_STATE_NULL);
+		gst_object_unref(data->pipe);
+		g_free(data);
+		return NULL;
+	}
+
 	gst_element_set_state(data->pipe, GST_STATE_PLAYING);
+	blog(LOG_INFO, "[obs-gstreamer-encoder] H.265 encoder pipeline started successfully");
 
 	return data;
 }

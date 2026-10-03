@@ -53,7 +53,10 @@ static inline void gstreamer_dock_unregister(void) {}
 
 bool obs_module_load(void)
 {
-	blog(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
+	blog(LOG_INFO, "[obs-gstreamer] Loading plugin (version: %s)", PLUGIN_VERSION);
+
+	gst_init(NULL, NULL);
+	blog(LOG_INFO, "[obs-gstreamer] GStreamer runtime initialized: %s", gst_version_string());
 
 	struct obs_output_info output_info = {
 		.id = "hjm-gstreamer-output",
@@ -75,18 +78,20 @@ bool obs_module_load(void)
 	};
 
 	obs_register_output(&output_info);
+	blog(LOG_INFO, "[obs-gstreamer] Registered output module: hjm-gstreamer-output");
+
 	gstreamer_encoder_tex_register();
 	gstreamer_dock_register();
-
-	gst_init(NULL, NULL);
+	blog(LOG_INFO, "[obs-gstreamer] Plugin loaded successfully");
 
 	return true;
 }
 
 void obs_module_unload(void)
 {
+	blog(LOG_INFO, "[obs-gstreamer] Unloading plugin...");
 	gst_render_hub_shutdown();
 	gstreamer_dock_unregister();
 	gstreamer_encoder_tex_unregister();
-	blog(LOG_INFO, "plugin unloaded");
+	blog(LOG_INFO, "[obs-gstreamer] Plugin unloaded successfully");
 }

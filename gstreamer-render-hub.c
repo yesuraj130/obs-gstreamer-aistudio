@@ -410,17 +410,30 @@ static bool hub_init(struct gst_master_hub *hub, const gst_hub_output_params_t *
 	hub->stagesurf[1] = gs_stagesurface_create(hub->width, hub->height, GS_RGBA);
 	obs_leave_graphics();
 
+	if (!hub->texrender[0] || !hub->texrender[1] || !hub->stagesurf[0] || !hub->stagesurf[1]) {
+		blog(LOG_ERROR, "[obs-gstreamer-hub] Failed to allocate GPU texrender (%p, %p) or stagesurf (%p, %p)",
+			(void *)hub->texrender[0], (void *)hub->texrender[1],
+			(void *)hub->stagesurf[0], (void *)hub->stagesurf[1]);
+		return false;
+	}
+
 	hub->pingpong_idx = 0;
 	hub->first_frame_primed = false;
 
 	// Launch Master GStreamer Hardware Encoder
 	hub->pipe = create_master_encoder_pipeline(hub, params->master_pipeline, params->encoder_type, params->bitrate_kbps, params->keyint_sec);
 	if (!hub->pipe) {
+		blog(LOG_ERROR, "[obs-gstreamer-hub] Failed to create master encoder pipeline");
 		return false;
 	}
 
 	hub->appsrc = gst_bin_get_by_name(GST_BIN(hub->pipe), "hub_appsrc");
 	hub->appsink = gst_bin_get_by_name(GST_BIN(hub->pipe), "hub_appsink");
+	if (!hub->appsrc || !hub->appsink) {
+		blog(LOG_ERROR, "[obs-gstreamer-hub] Master pipeline missing hub_appsrc (%p) or hub_appsink (%p)",
+			(void *)hub->appsrc, (void *)hub->appsink);
+		return false;
+	}
 
 	hub->connected_client_count = 0;
 	gst_element_set_state(hub->pipe, GST_STATE_PAUSED);

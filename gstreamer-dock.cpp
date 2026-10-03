@@ -579,6 +579,10 @@ static void start_selected(gstreamer_dock_state *state, int row)
 {
 	if (row < 0 || row >= static_cast<int>(state->configurations.size())) return;
 	gstreamer_output_config &config = state->configurations[row];
+	blog(LOG_INFO, "[obs-gstreamer-dock] Starting output #%d: '%s' (mode=%s, source_type=%s, source_name=%s)",
+		row, config.name.toUtf8().constData(), config.mode.toUtf8().constData(),
+		config.source_type.toUtf8().constData(),
+		(config.source_type == "Scene" ? config.scene_name : config.source_name).toUtf8().constData());
 
 	// Port Conflict Detection: If starting an RTSP server, check if port is already taken by another active output
 	const bool is_rtsp = config.use_render_hub || (config.mode == "RTSP");
@@ -591,6 +595,8 @@ static void start_selected(gstreamer_dock_state *state, int row)
 				const bool other_is_rtsp = other.use_render_hub || (other.mode == "RTSP");
 				const QString other_port = other.rtsp_service.trimmed().isEmpty() ? "8554" : other.rtsp_service.trimmed();
 				if (other_is_rtsp && other_port == target_port) {
+					blog(LOG_ERROR, "[obs-gstreamer-dock] Port conflict: '%s' requested port %s which is in use by '%s'",
+						config.name.toUtf8().constData(), target_port.toUtf8().constData(), other.name.toUtf8().constData());
 					QMessageBox::critical(
 						state->widget,
 						"RTSP Port Conflict",
@@ -622,6 +628,8 @@ static void start_selected(gstreamer_dock_state *state, int row)
 		config.hub_branch = gst_render_hub_start_branch(&params);
 		if (!config.hub_branch) {
 			const QString display_port = config.rtsp_service.trimmed().isEmpty() ? "8554" : config.rtsp_service.trimmed();
+			blog(LOG_ERROR, "[obs-gstreamer-dock] Failed to start Direct GPU RTSP server for '%s' on port %s",
+				config.name.toUtf8().constData(), display_port.toUtf8().constData());
 			QMessageBox::critical(
 				state->widget,
 				"Failed to Start RTSP Server",
@@ -637,7 +645,10 @@ static void start_selected(gstreamer_dock_state *state, int row)
 	obs_data_t *settings = output_settings(config);
 	config.output = obs_output_create("hjm-gstreamer-output", config.name.toUtf8().constData(), settings, nullptr);
 	obs_data_release(settings);
-	if (!config.output)	return;
+	if (!config.output) {
+		blog(LOG_ERROR, "[obs-gstreamer-dock] Failed to create output object 'hjm-gstreamer-output'");
+		return;
+	}
 	select_source(config);
 
 	if (config.use_gpu_encoder) {
@@ -651,17 +662,24 @@ static void start_selected(gstreamer_dock_state *state, int row)
 		obs_data_release(enc_settings);
 		if (config.encoder) {
 			obs_output_set_video_encoder(config.output, config.encoder);
+			blog(LOG_INFO, "[obs-gstreamer-dock] Bound hardware texture encoder '%s' to output", enc_id);
+		} else {
+			blog(LOG_ERROR, "[obs-gstreamer-dock] Failed to create hardware texture encoder '%s'", enc_id);
 		}
 	}
 
 	if (!obs_output_start(config.output)) {
 		const char *err = obs_output_get_last_error(config.output);
+		blog(LOG_ERROR, "[obs-gstreamer-dock] obs_output_start failed for '%s': %s",
+			config.name.toUtf8().constData(), (err && *err) ? err : "unknown error");
 		stop_output(config);
 		QMessageBox::critical(
 			state->widget,
 			"Failed to Start Output",
 			QString("Failed to start output '%1': %2")
 				.arg(config.name, (err && *err) ? QString::fromUtf8(err) : "Port already in use or pipeline initialization failed."));
+	} else {
+		blog(LOG_INFO, "[obs-gstreamer-dock] Output '%s' started successfully", config.name.toUtf8().constData());
 	}
 	refresh_rows(state);
 	save_configurations(state);
@@ -669,8 +687,11 @@ static void start_selected(gstreamer_dock_state *state, int row)
 
 static void stop_selected(gstreamer_dock_state *state, int row)
 {
-	if (row >= 0 && row < static_cast<int>(state->configurations.size()))
+	if (row >= 0 && row < static_cast<int>(state->configurations.size())) {
+		blog(LOG_INFO, "[obs-gstreamer-dock] Stopping output #%d: '%s'",
+			row, state->configurations[row].name.toUtf8().constData());
 		stop_output(state->configurations[row]);
+	}
 	refresh_rows(state);
 }
 

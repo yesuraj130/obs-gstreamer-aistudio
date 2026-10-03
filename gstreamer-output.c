@@ -189,24 +189,47 @@ static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media
 
 static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer user_data)
 {
-	blog(LOG_INFO, "bus_callback = called");
 	data_t *data = user_data;
 	const char *output_name = (data && data->output) ? obs_output_get_name(data->output) : "GStreamer Output";
+	const char *src_name = GST_MESSAGE_SRC_NAME(message);
 
 	switch (GST_MESSAGE_TYPE(message)) {
 		case GST_MESSAGE_ERROR: {
-			GError *err;
-			gst_message_parse_error(message, &err, NULL);
-			blog(LOG_ERROR, "[obs-gstreamer] %s: %s", output_name, err->message);
-			g_error_free(err);
+			GError *err = NULL;
+			gchar *debug = NULL;
+			gst_message_parse_error(message, &err, &debug);
+			blog(LOG_ERROR, "[obs-gstreamer] %s [%s] ERROR: %s (debug: %s)",
+				output_name, src_name ? src_name : "pipeline",
+				err ? err->message : "unknown error",
+				debug ? debug : "none");
+			if (err) g_error_free(err);
+			g_free(debug);
 			break;
 		}
 		case GST_MESSAGE_WARNING: {
-			GError *err;
-			gst_message_parse_warning(message, &err, NULL);
-			blog(LOG_WARNING, "[obs-gstreamer] %s: %s", output_name, err->message);
-			g_error_free(err);
-		} break;
+			GError *err = NULL;
+			gchar *debug = NULL;
+			gst_message_parse_warning(message, &err, &debug);
+			blog(LOG_WARNING, "[obs-gstreamer] %s [%s] WARNING: %s (debug: %s)",
+				output_name, src_name ? src_name : "pipeline",
+				err ? err->message : "unknown warning",
+				debug ? debug : "none");
+			if (err) g_error_free(err);
+			g_free(debug);
+			break;
+		}
+		case GST_MESSAGE_STATE_CHANGED: {
+			if (GST_MESSAGE_SRC(message) == GST_OBJECT(data->pipe)) {
+				GstState old_s, new_s, pending_s;
+				gst_message_parse_state_changed(message, &old_s, &new_s, &pending_s);
+				blog(LOG_INFO, "[obs-gstreamer] %s state changed: %s -> %s (pending: %s)",
+					output_name,
+					gst_element_state_get_name(old_s),
+					gst_element_state_get_name(new_s),
+					gst_element_state_get_name(pending_s));
+			}
+			break;
+		}
 		default:
 			break;
 	}
@@ -226,13 +249,18 @@ void *gstreamer_output_create(obs_data_t *settings, obs_output_t *output)
 	g_mutex_init(&data->lock);
 	data->output = output;
 	data->settings = settings;
-	blog(LOG_INFO, "gstreamer_output_create = called");
+	blog(LOG_INFO, "[obs-gstreamer] Output instance created (output=%p, name=%s)",
+		(void *)output, output ? obs_output_get_name(output) : "unnamed");
 	return data;
 }
 
 void gstreamer_output_destroy(void *p)
 {
 	data_t *data = (data_t *)p;
+	if (!data) return;
+
+	blog(LOG_INFO, "[obs-gstreamer] Destroying output instance (total raw video frames: %llu)",
+		(unsigned long long)data->raw_video_frames);
 
 	if (data->webrtc) {
 		g_mutex_lock(&data->lock);
@@ -291,34 +319,38 @@ void gstreamer_output_destroy(void *p)
 	data->mount_point = NULL;
 	g_mutex_clear(&data->lock);
 	g_free(data);
-	blog(LOG_INFO, "gstreamer_output_destroy = end");
+	blog(LOG_INFO, "[obs-gstreamer] Output destroyed cleanly");
 }
 
 bool gstreamer_output_start(void *p)
 {
-	blog(LOG_INFO, "gstreamer_output_start = called");
 	data_t *data = (data_t *)p;
+	if (!data) return false;
+
+	blog(LOG_INFO, "[obs-gstreamer] Attempting to start output '%s'",
+		data->output ? obs_output_get_name(data->output) : "unnamed");
 
 	if (!obs_output_can_begin_data_capture(data->output, 0)) {
-		blog(LOG_INFO, "output obs_output_can_begin_data_capture = false");
+		blog(LOG_ERROR, "[obs-gstreamer] obs_output_can_begin_data_capture returned false");
 		return false;
 	}
-	blog(LOG_INFO, "output obs_output_can_begin_data_capture = true");
 
 	obs_get_video_info(&data->ovi);
 	data->rtsp_server = obs_data_get_bool(data->settings, "rtsp_server");
 	data->webrtc_output = obs_data_get_bool(data->settings, "webrtc_output");
 	const char *gst_format = obs_video_format_to_gst_format(data->ovi.output_format);
 	if (!gst_format) {
-		blog(LOG_ERROR, "unhandled output format: %d", data->ovi.output_format);
+		blog(LOG_ERROR, "[obs-gstreamer] Unhandled video output format: %d", data->ovi.output_format);
 		return false;
 	}
 	data->buffer_size = obs_video_format_buffer_size(data->ovi.output_format,
 		data->ovi.output_width, data->ovi.output_height);
-	if (data->webrtc_output)
-		blog(LOG_INFO, "[obs-gstreamer] WebRTC video format=%d (%s), size=%dx%d, frame bytes=%llu",
-			data->ovi.output_format, gst_format, data->ovi.output_width,
-			data->ovi.output_height, (unsigned long long)data->buffer_size);
+
+	blog(LOG_INFO, "[obs-gstreamer] Output video config: %dx%d @ %d/%d fps, format=%d (%s), frame size=%zu bytes, mode=%s",
+		data->ovi.output_width, data->ovi.output_height,
+		data->ovi.fps_num, data->ovi.fps_den,
+		data->ovi.output_format, gst_format, data->buffer_size,
+		data->rtsp_server ? "RTSP Server" : (data->webrtc_output ? "WebRTC (WHEP)" : "Custom Pipeline"));
 
 	if (data->rtsp_server) {
 		const char *mount = obs_data_get_string(data->settings, "rtsp_mount");
@@ -334,6 +366,10 @@ bool gstreamer_output_start(void *p)
 			launch = g_strdup(chosen_pipe);
 		}
 
+		blog(LOG_INFO, "[obs-gstreamer] Starting RTSP server: service/port=%s, mount=%s",
+			service && service[0] ? service : "8554", mount && mount[0] ? mount : "/live");
+		blog(LOG_INFO, "[obs-gstreamer] RTSP pipeline string: %s", launch);
+
 		data->server = gst_rtsp_server_new();
 		if (service && service[0])
 			gst_rtsp_server_set_service(data->server, service);
@@ -347,7 +383,7 @@ bool gstreamer_output_start(void *p)
 		gst_rtsp_mount_points_add_factory(data->mounts, data->mount_point, data->factory);
 		data->server_source_id = gst_rtsp_server_attach(data->server, NULL);
 		if (data->server_source_id == 0) {
-			blog(LOG_ERROR, "[obs-gstreamer] Failed to attach RTSP server on port %s: address already in use", service && service[0] ? service : "8554");
+			blog(LOG_ERROR, "[obs-gstreamer] Failed to attach RTSP server on port %s: address already in use or bind failed", service && service[0] ? service : "8554");
 			obs_output_set_last_error(data->output, "Failed to start RTSP server: port already in use or bind failed");
 			if (data->mounts && data->mount_point) {
 				gst_rtsp_mount_points_remove_factory(data->mounts, data->mount_point);
@@ -376,9 +412,10 @@ bool gstreamer_output_start(void *p)
 		blog(LOG_INFO, "[obs-gstreamer] RTSP server started at rtsp://127.0.0.1:%s%s", gst_rtsp_server_get_service(data->server), data->mount_point);
 	} else if (data->webrtc_output) {
 		char *error = NULL;
+		blog(LOG_INFO, "[obs-gstreamer] Initializing WebRTC (WHEP) output...");
 		data->webrtc = gstreamer_webrtc_create(data->output, data->settings, &data->ovi, &error);
 		if (!data->webrtc) {
-			blog(LOG_ERROR, "gstreamer_output_start = WebRTC init failed: %s",
+			blog(LOG_ERROR, "[obs-gstreamer] WebRTC init failed: %s",
 				error ? error : "unknown error");
 			obs_output_set_last_error(data->output, error ? error : "WebRTC output failed to start");
 			g_free(error);
@@ -388,7 +425,7 @@ bool gstreamer_output_start(void *p)
 		g_mutex_lock(&data->lock);
 		data->video = gstreamer_webrtc_appsrc(data->webrtc);
 		g_mutex_unlock(&data->lock);
-		blog(LOG_INFO, "[obs-gstreamer] WebRTC output started");
+		blog(LOG_INFO, "[obs-gstreamer] WebRTC output started successfully");
 	} else {
 		GError *err = NULL;
 		char *pipe_string = g_strdup_printf(
@@ -397,11 +434,13 @@ bool gstreamer_output_start(void *p)
 			data->ovi.fps_num, data->ovi.fps_den,
 			obs_data_get_string(data->settings, "pipeline"));
 
+		blog(LOG_INFO, "[obs-gstreamer] Launching custom pipeline: %s", pipe_string);
 		data->pipe = gst_parse_launch(pipe_string, &err);
 		g_free(pipe_string);
 
 		if (err) {
-			blog(LOG_ERROR, "gstreamer_output_start = gst_parse_launch error: %s", err->message);
+			blog(LOG_ERROR, "[obs-gstreamer] gst_parse_launch error: %s", err->message);
+			obs_output_set_last_error(data->output, err->message);
 			g_error_free(err);
 			return false;
 		}
@@ -410,7 +449,8 @@ bool gstreamer_output_start(void *p)
 		data->video = gst_bin_get_by_name(GST_BIN(data->pipe), "appsrc_video");
 		if (!data->video) {
 			g_mutex_unlock(&data->lock);
-			blog(LOG_ERROR, "gstreamer_output_start = appsrc_video element not found in pipeline");
+			blog(LOG_ERROR, "[obs-gstreamer] 'appsrc_video' element not found in custom pipeline");
+			obs_output_set_last_error(data->output, "Pipeline missing 'appsrc_video' element");
 			gst_object_unref(data->pipe);
 			data->pipe = NULL;
 			return false;
@@ -421,21 +461,29 @@ bool gstreamer_output_start(void *p)
 		GstBus *bus = gst_element_get_bus(data->pipe);
 		gst_bus_add_watch(bus, bus_callback, data);
 		gst_object_unref(bus);
-		gst_element_set_state(data->pipe, GST_STATE_PLAYING);
+
+		GstStateChangeReturn s_ret = gst_element_set_state(data->pipe, GST_STATE_PLAYING);
+		blog(LOG_INFO, "[obs-gstreamer] Custom pipeline state set to PLAYING (ret=%d)", s_ret);
 	}
 
-	obs_output_begin_data_capture(data->output, 0);
-	blog(LOG_INFO, "obs_output_begin_data_capture = end");
+	if (!obs_output_begin_data_capture(data->output, 0)) {
+		blog(LOG_ERROR, "[obs-gstreamer] obs_output_begin_data_capture failed");
+		return false;
+	}
+	blog(LOG_INFO, "[obs-gstreamer] Output data capture began successfully");
 	return true;
 }
 
 void gstreamer_output_stop(void *p, uint64_t ts)
 {
-	blog(LOG_INFO, "gstreamer_output_stop = called");
 	data_t *data = (data_t *)p;
+	if (!data) return;
+
+	blog(LOG_INFO, "[obs-gstreamer] Stopping output '%s'...",
+		data->output ? obs_output_get_name(data->output) : "unnamed");
 
 	obs_output_end_data_capture(data->output);
-	blog(LOG_INFO, "gstreamer_output_stop = obs_output_end_data_capture stopped");
+	blog(LOG_INFO, "[obs-gstreamer] obs_output_end_data_capture stopped");
 
 	g_mutex_lock(&data->lock);
 	GstElement *video = data->video;
@@ -483,13 +531,13 @@ void gstreamer_output_stop(void *p, uint64_t ts)
 		}
 		g_free(data->mount_point);
 		data->mount_point = NULL;
-		blog(LOG_INFO, "gstreamer_output_stop = RTSP server stopped");
+		blog(LOG_INFO, "[obs-gstreamer] RTSP server stopped");
 	}
 
 	if (data->webrtc) {
 		gstreamer_webrtc_destroy(data->webrtc);
 		data->webrtc = NULL;
-		blog(LOG_INFO, "gstreamer_output_stop = WebRTC server stopped");
+		blog(LOG_INFO, "[obs-gstreamer] WebRTC server stopped");
 	}
 
 	if (data->pipe) {
@@ -502,10 +550,10 @@ void gstreamer_output_stop(void *p, uint64_t ts)
 		gst_element_set_state(data->pipe, GST_STATE_NULL);
 		gst_object_unref(data->pipe);
 		data->pipe = NULL;
-		blog(LOG_INFO, "gstreamer_output_stop = unref complete");
+		blog(LOG_INFO, "[obs-gstreamer] Custom pipeline stopped and unref complete");
 	}
 
-	blog(LOG_INFO, "gstreamer_output_stop = end");
+	blog(LOG_INFO, "[obs-gstreamer] Output stopped cleanly");
 }
 
 void gstreamer_output_encoded_packet(void *p, struct encoder_packet *packet)
@@ -529,7 +577,11 @@ void gstreamer_output_encoded_packet(void *p, struct encoder_packet *packet)
 
 	gst_buffer_set_flags(buffer, packet->keyframe ? 0 : GST_BUFFER_FLAG_DELTA_UNIT);
 
-	gst_app_src_push_buffer(GST_APP_SRC(video), buffer);
+	GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(video), buffer);
+	if (ret != GST_FLOW_OK && ret != GST_FLOW_FLUSHING) {
+		blog(LOG_WARNING, "[obs-gstreamer] Encoded packet appsrc push failed: %s (size=%zu)",
+			gst_flow_get_name(ret), packet->size);
+	}
 	gst_object_unref(video);
 }
 
@@ -552,11 +604,18 @@ void gstreamer_output_raw_video(void *p, struct video_data *frame)
 	GstBuffer *buffer = gst_buffer_new_wrapped_full(0, frame->data[0], data->buffer_size, 0, data->buffer_size, NULL, NULL);
 
 	GstFlowReturn result = gst_app_src_push_buffer(GST_APP_SRC(video), buffer);
-	if (data->webrtc_output && (data->raw_video_frames == 1 || data->raw_video_frames % 60 == 0))
-		blog(LOG_INFO, "[obs-gstreamer] WebRTC raw frame %llu pushed, result=%s, size=%llu",
-			(unsigned long long)data->raw_video_frames, gst_flow_get_name(result), (unsigned long long)data->buffer_size);
-	if (result != GST_FLOW_OK && result != GST_FLOW_FLUSHING)
-		blog(LOG_WARNING, "[obs-gstreamer] RTSP appsrc push failed: %s", gst_flow_get_name(result));
+	if (data->raw_video_frames == 1) {
+		blog(LOG_INFO, "[obs-gstreamer] First raw video frame pushed: %dx%d (%zu bytes), result=%s",
+			data->ovi.output_width, data->ovi.output_height, data->buffer_size, gst_flow_get_name(result));
+	} else if (data->raw_video_frames % 300 == 0) {
+		blog(LOG_INFO, "[obs-gstreamer] Raw video frame %llu pushed (flow=%s)",
+			(unsigned long long)data->raw_video_frames, gst_flow_get_name(result));
+	}
+
+	if (result != GST_FLOW_OK && result != GST_FLOW_FLUSHING) {
+		blog(LOG_WARNING, "[obs-gstreamer] Raw video appsrc push failed: %s (frame %llu)",
+			gst_flow_get_name(result), (unsigned long long)data->raw_video_frames);
+	}
 
 	gst_object_unref(video);
 }
@@ -614,7 +673,10 @@ void gstreamer_output_raw_audio(void *p, struct audio_data *frame)
 	if (oai.samples_per_sec > 0)
 		GST_BUFFER_DURATION(buffer) = (GstClockTime)frame->frames * GST_SECOND / oai.samples_per_sec;
 
-	gst_app_src_push_buffer(GST_APP_SRC(audio), buffer);
+	GstFlowReturn a_ret = gst_app_src_push_buffer(GST_APP_SRC(audio), buffer);
+	if (a_ret != GST_FLOW_OK && a_ret != GST_FLOW_FLUSHING) {
+		blog(LOG_WARNING, "[obs-gstreamer] Raw audio appsrc push failed: %s", gst_flow_get_name(a_ret));
+	}
 	gst_object_unref(audio);
 }
 

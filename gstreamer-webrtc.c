@@ -839,19 +839,31 @@ static void seed_web_root(const char *root)
 
 static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer user_data)
 {
+	const char *src_name = GST_MESSAGE_SRC_NAME(message);
+
 	switch (GST_MESSAGE_TYPE(message)) {
 	case GST_MESSAGE_ERROR: {
 		GError *err = NULL;
-		gst_message_parse_error(message, &err, NULL);
-		blog(LOG_ERROR, "[obs-gstreamer] WebRTC pipeline error: %s", err->message);
-		g_error_free(err);
+		gchar *debug = NULL;
+		gst_message_parse_error(message, &err, &debug);
+		blog(LOG_ERROR, "[obs-gstreamer-webrtc] [%s] ERROR: %s (debug: %s)",
+			src_name ? src_name : "pipeline",
+			err ? err->message : "unknown error",
+			debug ? debug : "none");
+		if (err) g_error_free(err);
+		g_free(debug);
 		break;
 	}
 	case GST_MESSAGE_WARNING: {
 		GError *err = NULL;
-		gst_message_parse_warning(message, &err, NULL);
-		blog(LOG_WARNING, "[obs-gstreamer] WebRTC pipeline warning: %s", err->message);
-		g_error_free(err);
+		gchar *debug = NULL;
+		gst_message_parse_warning(message, &err, &debug);
+		blog(LOG_WARNING, "[obs-gstreamer-webrtc] [%s] WARNING: %s (debug: %s)",
+			src_name ? src_name : "pipeline",
+			err ? err->message : "unknown warning",
+			debug ? debug : "none");
+		if (err) g_error_free(err);
+		g_free(debug);
 		break;
 	}
 	default:
