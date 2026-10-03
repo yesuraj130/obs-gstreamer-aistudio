@@ -920,10 +920,12 @@ static QDockWidget *g_dock_widget = nullptr;
 extern "C" void gstreamer_dock_register(void)
 {
 	if (!g_dock_widget) {
+		blog(LOG_INFO, "[obs-gstreamer-dock] Registering 'GStreamer Output' dock widget with OBS frontend");
 		g_dock_widget = new QDockWidget("GStreamer Output");
 		g_dock_widget->setObjectName("obs-gstreamer-dock");
 		g_dock_widget->setWidget(create_gstreamer_dock_widget());
 		obs_frontend_add_dock(g_dock_widget);
+		blog(LOG_INFO, "[obs-gstreamer-dock] 'GStreamer Output' dock registered successfully");
 	}
 }
 

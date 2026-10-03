@@ -47,7 +47,10 @@ extern obs_properties_t *gstreamer_output_get_properties(void *data);
 extern void gstreamer_dock_register(void);
 extern void gstreamer_dock_unregister(void);
 #else
-static inline void gstreamer_dock_register(void) {}
+static inline void gstreamer_dock_register(void)
+{
+	blog(LOG_WARNING, "[obs-gstreamer] Dock UI is DISABLED in this build (compiled with ENABLE_DOCK=0)");
+}
 static inline void gstreamer_dock_unregister(void) {}
 #endif
 

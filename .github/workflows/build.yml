@@ -98,88 +98,127 @@ jobs:
           path: obs-gstreamer-obs27-win32.zip
 
   # =========================================================================
-  # Target 2: Modern OBS Studio 28+/30+ (64-bit x64) for Windows 10/11
+  # Target 2: Modern OBS Studio 28+/30+/32+ (64-bit x64) for Windows 10/11
+  # Native MSVC + Qt 6 Build (Enables Native Qt6 Dock in OBS Studio Menu)
   # =========================================================================
   build-win64-obs30:
-    name: "Windows 10/11 / OBS 30+ (64-bit x64)"
-    runs-on: ubuntu-latest
+    name: "Windows 10/11 / OBS 30+ (64-bit MSVC + Qt6 Dock)"
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build prerequisites & MinGW-w64 x86_64
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Meson and Ninja
+        run: pip install meson ninja
+
+      - name: Install Qt 6 (MSVC 64-bit)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.3'
+          arch: 'win64_msvc2019_64'
+          modules: 'qtbase'
+          cache: true
+
+      - name: Fetch and install GStreamer MSVC 64-bit SDK
+        shell: pwsh
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 mingw-w64-tools \
-            ninja-build python3-pip msitools wget unzip pkg-config
-          pip3 install --upgrade meson
+          $gst_url = "https://gstreamer.freedesktop.org/data/pkg/windows/1.22.12/msvc/gstreamer-1.0-devel-msvc-x86_64-1.22.12.msi"
+          Write-Host "Downloading GStreamer MSVC Devel SDK..."
+          Invoke-WebRequest -Uri $gst_url -OutFile "gst-devel.msi"
+          Write-Host "Installing GStreamer MSVC Devel SDK..."
+          Start-Process msiexec.exe -ArgumentList "/i gst-devel.msi /qn /norestart" -Wait
+          if (!(Test-Path "C:\gstreamer\1.0\msvc_x86_64\bin\pkg-config.exe")) {
+            Write-Error "GStreamer installation failed: pkg-config.exe not found at C:\gstreamer\1.0\msvc_x86_64\bin\pkg-config.exe"
+            exit 1
+          }
+          Write-Host "GStreamer MSVC SDK installed successfully."
 
       - name: Fetch and prepare OBS Studio 30.2.2 (x64) SDK
+        shell: pwsh
         run: |
-          mkdir -p obs-sdk-win64/include/obs
-          mkdir -p obs-sdk-win64/lib/pkgconfig
-          cd obs-sdk-win64
-          wget -q https://github.com/obsproject/obs-studio/releases/download/30.2.2/OBS-Studio-30.2.2-Windows.zip
-          unzip -q -o OBS-Studio-30.2.2-Windows.zip "bin/64bit/*"
-          wget -q https://github.com/obsproject/obs-studio/archive/refs/tags/30.2.2.tar.gz
-          tar -xzf 30.2.2.tar.gz
-          
-          # Provide headers in both include/obs/ and include/
-          cp -r obs-studio-30.2.2/libobs/* include/obs/
-          cp -r obs-studio-30.2.2/UI/obs-frontend-api/* include/obs/
-          cp -r obs-studio-30.2.2/libobs/* include/
-          cp -r obs-studio-30.2.2/UI/obs-frontend-api/* include/
-          
-          # Generate MinGW import libraries from 64-bit OBS binaries
-          gendef bin/64bit/obs.dll
-          x86_64-w64-mingw32-dlltool -d obs.def -l libobs.dll.a -D obs.dll
-          gendef bin/64bit/obs-frontend-api.dll
-          x86_64-w64-mingw32-dlltool -d obs-frontend-api.def -l libobs-frontend-api.dll.a -D obs-frontend-api.dll
+          New-Item -ItemType Directory -Force -Path "obs-sdk\include\obs" | Out-Null
+          New-Item -ItemType Directory -Force -Path "obs-sdk\lib\pkgconfig" | Out-Null
 
-          SDK_DIR="$(pwd)"
-          printf "prefix=%s\nlibdir=%s\nincludedir=%s/include\n\nName: libobs\nDescription: OBS Studio library\nVersion: 30.2.2\nLibs: -L\${libdir} -lobs\nCflags: -I\${includedir}\n" "$SDK_DIR" "$SDK_DIR" "$SDK_DIR" > lib/pkgconfig/libobs.pc
-          printf "prefix=%s\nlibdir=%s\nincludedir=%s/include\n\nName: obs-frontend-api\nDescription: OBS Studio Frontend API library\nVersion: 30.2.2\nLibs: -L\${libdir} -lobs-frontend-api\nCflags: -I\${includedir}\n" "$SDK_DIR" "$SDK_DIR" "$SDK_DIR" > lib/pkgconfig/obs-frontend-api.pc
-          cd ..
+          Write-Host "Downloading OBS Studio 30.2.2 Windows binary..."
+          Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/releases/download/30.2.2/OBS-Studio-30.2.2-Windows.zip" -OutFile "obs-bin.zip"
+          Expand-Archive -Path "obs-bin.zip" -DestinationPath "obs-bin"
 
-      - name: Fetch and prepare GStreamer 1.22.12 (x64) MinGW SDK
+          Write-Host "Downloading OBS Studio 30.2.2 source headers..."
+          Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/archive/refs/tags/30.2.2.zip" -OutFile "obs-src.zip"
+          Expand-Archive -Path "obs-src.zip" -DestinationPath "obs-src"
+
+          # Provide headers
+          Copy-Item -Recurse -Force "obs-src\obs-studio-30.2.2\libobs\*" "obs-sdk\include\obs\"
+          Copy-Item -Recurse -Force "obs-src\obs-studio-30.2.2\UI\obs-frontend-api\*" "obs-sdk\include\obs\"
+          Copy-Item -Recurse -Force "obs-src\obs-studio-30.2.2\libobs\*" "obs-sdk\include\"
+          Copy-Item -Recurse -Force "obs-src\obs-studio-30.2.2\UI\obs-frontend-api\*" "obs-sdk\include\"
+
+          # Generate MSVC import library for obs.dll
+          "EXPORTS" | Out-File -FilePath "obs.def" -Encoding ascii
+          dumpbin /exports "obs-bin\bin\64bit\obs.dll" | Select-String -Pattern '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Out-File -FilePath "obs.def" -Append -Encoding ascii
+          lib /def:obs.def /machine:x64 /out:"obs-sdk\lib\obs.lib"
+
+          # Generate MSVC import library for obs-frontend-api.dll
+          "EXPORTS" | Out-File -FilePath "obs-frontend-api.def" -Encoding ascii
+          dumpbin /exports "obs-bin\bin\64bit\obs-frontend-api.dll" | Select-String -Pattern '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Out-File -FilePath "obs-frontend-api.def" -Append -Encoding ascii
+          lib /def:obs-frontend-api.def /machine:x64 /out:"obs-sdk\lib\obs-frontend-api.lib"
+
+          # Generate pkg-config files with forward slashes for Meson
+          $sdkPath = (Get-Item "obs-sdk").FullName.Replace("\", "/")
+          @"
+prefix=$sdkPath
+libdir=`${prefix}/lib
+includedir=`${prefix}/include
+
+Name: libobs
+Description: OBS Studio library
+Version: 30.2.2
+Libs: -L`${libdir} -lobs
+Cflags: -I`${includedir} -I`${includedir}/obs
+"@ | Out-File -FilePath "obs-sdk\lib\pkgconfig\libobs.pc" -Encoding ascii
+
+          @"
+prefix=$sdkPath
+libdir=`${prefix}/lib
+includedir=`${prefix}/include
+
+Name: obs-frontend-api
+Description: OBS Studio Frontend API library
+Version: 30.2.2
+Libs: -L`${libdir} -lobs-frontend-api
+Cflags: -I`${includedir} -I`${includedir}/obs
+"@ | Out-File -FilePath "obs-sdk\lib\pkgconfig\obs-frontend-api.pc" -Encoding ascii
+
+      - name: Configure and Compile with Meson and Ninja (MSVC + Qt6 Dock)
+        shell: pwsh
         run: |
-          mkdir -p gst-sdk-win64
-          cd gst-sdk-win64
-          GST_URL="https://gstreamer.freedesktop.org/data/pkg/windows/1.22.12/mingw/gstreamer-1.0-devel-mingw-x86_64-1.22.12.msi"
-          wget -q "$GST_URL" -O gst-devel.msi || wget -q https://gstreamer.freedesktop.org/data/pkg/windows/1.20.7/mingw/gstreamer-1.0-devel-mingw-x86_64-1.20.7.msi -O gst-devel.msi
-          msiextract gst-devel.msi
-          
-          # Normalize pkg-config paths to current extracted location
-          GST_ROOT="$(pwd)/gstreamer/1.0/mingw_x86_64"
-          sed -i.bak "s|^prefix=.*|prefix=${GST_ROOT}|g" "${GST_ROOT}/lib/pkgconfig/"*.pc
-          cd ..
+          $env:PATH = "C:\gstreamer\1.0\msvc_x86_64\bin;$($env:QTDIR)\bin;$env:PATH"
+          $sdkPkgPath = (Get-Item "obs-sdk\lib\pkgconfig").FullName
+          $env:PKG_CONFIG_PATH = "$sdkPkgPath;C:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig"
 
-      - name: Configure Meson build (64-bit x64, Modern Windows target)
-        run: |
-          export PKG_CONFIG_PATH="$(pwd)/obs-sdk-win64/lib/pkgconfig:$(pwd)/gst-sdk-win64/gstreamer/1.0/mingw_x86_64/lib/pkgconfig"
-          export PKG_CONFIG_LIBDIR="${PKG_CONFIG_PATH}"
-          
-          meson setup build-win64 \
-            --cross-file cross/x86_64-w64-mingw32.ini \
-            --buildtype release \
-            -Dwebrtc=auto
-
-      - name: Compile 64-bit Plugin
-        run: |
+          meson setup build-win64 --buildtype release -Dwebrtc=disabled
           ninja -C build-win64
 
-      - name: Package OBS 30 (64-bit Win10/11) Release Archive
+      - name: Package OBS 30+ (64-bit Win10/11) Release Archive
+        shell: pwsh
         run: |
-          mkdir -p package-win64/obs-plugins/64bit
-          cp build-win64/obs-gstreamer.dll package-win64/obs-plugins/64bit/
-          cp docs/README-INSTALL-OBS30-WIN64.txt package-win64/README-INSTALL.txt
-          
-          cd package-win64
-          zip -r ../obs-gstreamer-obs30-win64.zip ./*
-          cd ..
+          New-Item -ItemType Directory -Force -Path "package-win64\obs-plugins\64bit" | Out-Null
+          Copy-Item "build-win64\obs-gstreamer.dll" "package-win64\obs-plugins\64bit\"
+          Copy-Item "docs\README-INSTALL-OBS30-WIN64.txt" "package-win64\README-INSTALL.txt"
 
-      - name: Upload Win64 (OBS 30) Artifact
+          Compress-Archive -Path "package-win64\*" -DestinationPath "obs-gstreamer-obs30-win64.zip" -Force
+
+      - name: Upload Win64 (OBS 30+) Artifact
         uses: actions/upload-artifact@v4
         with:
           name: obs-gstreamer-obs30-win64
