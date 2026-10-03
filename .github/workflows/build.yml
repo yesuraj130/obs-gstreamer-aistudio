@@ -131,16 +131,49 @@ jobs:
       - name: Fetch and install GStreamer MSVC 64-bit SDK
         shell: pwsh
         run: |
-          $gst_url = "https://gstreamer.freedesktop.org/data/pkg/windows/1.22.12/msvc/gstreamer-1.0-devel-msvc-x86_64-1.22.12.msi"
+          $gst_base = "https://gstreamer.freedesktop.org/data/pkg/windows/1.22.12/msvc"
+          $runtime_url = "$gst_base/gstreamer-1.0-msvc-x86_64-1.22.12.msi"
+          $devel_url = "$gst_base/gstreamer-1.0-devel-msvc-x86_64-1.22.12.msi"
+
+          Write-Host "Downloading GStreamer MSVC Runtime..."
+          Invoke-WebRequest -Uri $runtime_url -OutFile "gst-runtime.msi"
           Write-Host "Downloading GStreamer MSVC Devel SDK..."
-          Invoke-WebRequest -Uri $gst_url -OutFile "gst-devel.msi"
-          Write-Host "Installing GStreamer MSVC Devel SDK..."
-          Start-Process msiexec.exe -ArgumentList "/i gst-devel.msi /qn /norestart" -Wait
-          if (!(Test-Path "C:\gstreamer\1.0\msvc_x86_64\bin\pkg-config.exe")) {
-            Write-Error "GStreamer installation failed: pkg-config.exe not found at C:\gstreamer\1.0\msvc_x86_64\bin\pkg-config.exe"
+          Invoke-WebRequest -Uri $devel_url -OutFile "gst-devel.msi"
+
+          $runtimeMsi = (Get-Item "gst-runtime.msi").FullName
+          $develMsi = (Get-Item "gst-devel.msi").FullName
+
+          Write-Host "Installing GStreamer MSVC Runtime..."
+          $p1 = Start-Process msiexec.exe -ArgumentList "/i `"$runtimeMsi`" ADDLOCAL=ALL /qn /norestart" -Wait -PassThru
+          if ($p1.ExitCode -ne 0 -and $p1.ExitCode -ne 3010) {
+            Write-Error "GStreamer runtime installer failed with exit code $($p1.ExitCode)"
             exit 1
           }
-          Write-Host "GStreamer MSVC SDK installed successfully."
+
+          Write-Host "Installing GStreamer MSVC Devel SDK..."
+          $p2 = Start-Process msiexec.exe -ArgumentList "/i `"$develMsi`" ADDLOCAL=ALL /qn /norestart" -Wait -PassThru
+          if ($p2.ExitCode -ne 0 -and $p2.ExitCode -ne 3010) {
+            Write-Error "GStreamer devel installer failed with exit code $($p2.ExitCode)"
+            exit 1
+          }
+
+          # Refresh and detect GStreamer install directory
+          $candidates = @(
+            "C:\gstreamer\1.0\msvc_x86_64",
+            "C:\Program Files\gstreamer\1.0\msvc_x86_64",
+            [System.Environment]::GetEnvironmentVariable("GSTREAMER_1_0_ROOT_MSVC_X86_64", "Machine"),
+            [System.Environment]::GetEnvironmentVariable("GSTREAMER_1_0_ROOT_MSVC_X86_64", "User")
+          ) | Where-Object { $_ -and (Test-Path "$_\bin\pkg-config.exe") }
+
+          if ($candidates.Count -eq 0) {
+            Write-Error "GStreamer installation failed: pkg-config.exe not found. Searched C:\gstreamer\1.0\msvc_x86_64 and GSTREAMER_1_0_ROOT_MSVC_X86_64."
+            exit 1
+          }
+
+          $gstRoot = $candidates[0]
+          Write-Host "Found GStreamer MSVC SDK at: $gstRoot"
+          "GSTREAMER_ROOT=$gstRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$gstRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Fetch and prepare OBS Studio 30.2.2 (x64) SDK
         shell: pwsh
@@ -204,9 +237,10 @@ jobs:
       - name: Configure and Compile with Meson and Ninja (MSVC + Qt6 Dock)
         shell: pwsh
         run: |
-          $env:PATH = "C:\gstreamer\1.0\msvc_x86_64\bin;$($env:QTDIR)\bin;$env:PATH"
+          $gstRoot = if ($env:GSTREAMER_ROOT) { $env:GSTREAMER_ROOT } else { "C:\gstreamer\1.0\msvc_x86_64" }
+          $env:PATH = "$gstRoot\bin;$($env:QTDIR)\bin;$env:PATH"
           $sdkPkgPath = (Get-Item "obs-sdk\lib\pkgconfig").FullName
-          $env:PKG_CONFIG_PATH = "$sdkPkgPath;C:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig"
+          $env:PKG_CONFIG_PATH = "$sdkPkgPath;$gstRoot\lib\pkgconfig"
 
           meson setup build-win64 --buildtype release -Dwebrtc=disabled
           ninja -C build-win64
