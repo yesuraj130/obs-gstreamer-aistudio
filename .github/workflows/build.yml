@@ -113,7 +113,7 @@ jobs:
         run: |
           # Strawberry Perl contains broken pkg-config.bat and ccache wrappers that break MSVC & Meson
           $cleanPath = ($env:PATH.Split(';') | Where-Object { $_ -and $_ -notlike '*Strawberry*' }) -join ';'
-          "PATH=$cleanPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PATH=$cleanPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -182,9 +182,9 @@ jobs:
 
           $gstRoot = $candidates[0]
           Write-Host "Found GStreamer MSVC SDK at: $gstRoot"
-          "GSTREAMER_ROOT=$gstRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "$gstRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          "PKG_CONFIG=$gstRoot\bin\pkg-config.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "GSTREAMER_ROOT=$gstRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$gstRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "PKG_CONFIG=$gstRoot\bin\pkg-config.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Fetch and prepare OBS Studio 30.2.2 (x64) SDK
         shell: pwsh
@@ -248,28 +248,59 @@ jobs:
       - name: Configure and Compile with Meson and Ninja (MSVC + Qt6 Dock)
         shell: pwsh
         run: |
-          $gstRoot = if ($env:GSTREAMER_ROOT) { $env:GSTREAMER_ROOT } else { "C:\gstreamer\1.0\msvc_x86_64" }
-          $gstPkgPath = "$gstRoot\lib\pkgconfig"
+          # 1. Resolve GStreamer root and pkgconfig directory
+          $gstCandidates = @(
+            $env:GSTREAMER_ROOT,
+            "C:\gstreamer\1.0\msvc_x86_64",
+            "C:\Program Files\gstreamer\1.0\msvc_x86_64",
+            "C:\Program Files (x86)\gstreamer\1.0\msvc_x86_64",
+            [System.Environment]::GetEnvironmentVariable("GSTREAMER_1_0_ROOT_MSVC_X86_64", "Machine"),
+            [System.Environment]::GetEnvironmentVariable("GSTREAMER_1_0_ROOT_MSVC_X86_64", "User")
+          ) | Where-Object { $_ -and (Test-Path "$_\lib\pkgconfig\gstreamer-1.0.pc") }
+
+          if ($gstCandidates.Count -gt 0) {
+            $gstRoot = $gstCandidates[0]
+            $gstPkgPath = "$gstRoot\lib\pkgconfig"
+          } else {
+            Write-Host "Locating gstreamer-1.0.pc on disk..."
+            $foundPc = Get-ChildItem -Path "C:\" -Filter "gstreamer-1.0.pc" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($foundPc) {
+              $gstPkgPath = $foundPc.DirectoryName
+              $gstRoot = (Get-Item "$gstPkgPath\..\..").FullName
+            } else {
+              Write-Error "gstreamer-1.0.pc could not be located anywhere on the filesystem!"
+              exit 1
+            }
+          }
+
+          Write-Host "Resolved GStreamer Root: $gstRoot"
+          Write-Host "Resolved GStreamer PKG_CONFIG directory: $gstPkgPath"
+
+          # 2. Resolve pkg-config binary
+          if (Test-Path "$gstRoot\bin\pkg-config.exe") {
+            $pkgExe = "$gstRoot\bin\pkg-config.exe"
+          } elseif (Get-Command "pkg-config.exe" -ErrorAction SilentlyContinue) {
+            $pkgExe = (Get-Command "pkg-config.exe").Source
+          } else {
+            $pkgExe = "C:\ProgramData\chocolatey\bin\pkg-config.exe"
+          }
+          $env:PKG_CONFIG = $pkgExe
+          Write-Host "Using PKG_CONFIG binary: $env:PKG_CONFIG"
+
           $sdkFullPath = (Get-Item "obs-sdk").FullName
           $sdkPkgPath = (Get-Item "obs-sdk\lib\pkgconfig").FullName
-
           $sdkPkgFwd = $sdkPkgPath.Replace('\', '/')
           $gstPkgFwd = $gstPkgPath.Replace('\', '/')
 
-          if (Test-Path "$gstRoot\bin\pkg-config.exe") {
-            $env:PKG_CONFIG = "$gstRoot\bin\pkg-config.exe"
-          } else {
-            $env:PKG_CONFIG = "C:\ProgramData\chocolatey\bin\pkg-config.exe"
-          }
-
+          # Add directories to PATH, PKG_CONFIG_PATH, INCLUDE, and LIB
           $env:PATH = "$gstRoot\bin;$($env:QTDIR)\bin;C:\ProgramData\chocolatey\bin;$env:PATH"
           $env:PKG_CONFIG_PATH = "$sdkPkgPath;$gstPkgPath;$sdkPkgFwd;$gstPkgFwd"
-          $env:INCLUDE = "$sdkFullPath\include;$sdkFullPath\include\obs;$env:INCLUDE"
+          $env:INCLUDE = "$sdkFullPath\include;$sdkFullPath\include\obs;$gstRoot\include\gstreamer-1.0;$gstRoot\lib\gstreamer-1.0\include;$env:INCLUDE"
           $env:LIB = "$sdkFullPath\lib;$gstRoot\lib;$env:LIB"
 
           Write-Host "Verifying pkg-config resolution..."
           & $env:PKG_CONFIG --version
-          & $env:PKG_CONFIG --modversion gstreamer-1.0 || Write-Host "gstreamer-1.0 check finished"
+          & $env:PKG_CONFIG --modversion gstreamer-1.0
 
           $sdkIncludeFwd = $sdkFullPath.Replace('\', '/')
           meson setup build-win64 `
