@@ -21,7 +21,8 @@
 project('obs-gstreamer', ['c', 'cpp'],
   default_options : [
     'prefix=~/.config/obs-studio/plugins/obs-gstreamer/bin/64bit',
-    'libdir='
+    'libdir=',
+    'cpp_std=c++17'
   ],
 )
 

@@ -319,6 +319,7 @@ jobs:
           $sdkIncludeFwd = $sdkFullPath.Replace('\', '/')
           meson setup build-win64 `
             --buildtype release `
+            -Dcpp_std=c++17 `
             -Dwebrtc=disabled `
             -Dpkg_config_path="$sdkPkgFwd,$gstPkgFwd" `
             -Dc_args="-I$sdkIncludeFwd/include -I$sdkIncludeFwd/include/obs" `
