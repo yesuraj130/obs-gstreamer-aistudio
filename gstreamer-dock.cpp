@@ -916,15 +916,20 @@ static QWidget *create_gstreamer_dock_widget(void)
 }
 
 static QDockWidget *g_dock_widget = nullptr;
+static const char *DOCK_ID = "obs-gstreamer-dock";
 
 extern "C" void gstreamer_dock_register(void)
 {
 	if (!g_dock_widget) {
 		blog(LOG_INFO, "[obs-gstreamer-dock] Registering 'GStreamer Output' dock widget with OBS frontend");
 		g_dock_widget = new QDockWidget("GStreamer Output");
-		g_dock_widget->setObjectName("obs-gstreamer-dock");
+		g_dock_widget->setObjectName(DOCK_ID);
 		g_dock_widget->setWidget(create_gstreamer_dock_widget());
+#if (defined(LIBOBS_API_MAJOR_VER) && (LIBOBS_API_MAJOR_VER >= 30)) || (defined(LIBOBS_API_VER) && (LIBOBS_API_VER >= 0x1E000000))
+		obs_frontend_add_custom_qdock(DOCK_ID, g_dock_widget);
+#else
 		obs_frontend_add_dock(g_dock_widget);
+#endif
 		blog(LOG_INFO, "[obs-gstreamer-dock] 'GStreamer Output' dock registered successfully");
 	}
 }
@@ -932,6 +937,9 @@ extern "C" void gstreamer_dock_register(void)
 extern "C" void gstreamer_dock_unregister(void)
 {
 	if (g_dock_widget) {
+#if (defined(LIBOBS_API_MAJOR_VER) && (LIBOBS_API_MAJOR_VER >= 30)) || (defined(LIBOBS_API_VER) && (LIBOBS_API_VER >= 0x1E000000))
+		obs_frontend_remove_dock(DOCK_ID);
+#endif
 		delete g_dock_widget;
 		g_dock_widget = nullptr;
 	}
