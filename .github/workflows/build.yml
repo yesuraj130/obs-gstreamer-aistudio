@@ -126,7 +126,6 @@ jobs:
         with:
           version: '6.6.3'
           arch: 'win64_msvc2019_64'
-          modules: 'qtbase'
           cache: true
 
       - name: Fetch and install GStreamer MSVC 64-bit SDK
