@@ -44,24 +44,24 @@ jobs:
           cp -r obs-studio-27.2.4/UI/obs-frontend-api/* include/
 
           # Generate obsconfig.h (normally produced by CMake build)
-          cat << 'EOF' > include/obs/obsconfig.h
-#pragma once
-#ifndef OBS_INSTALL_PREFIX
-#define OBS_INSTALL_PREFIX ""
-#endif
-#ifndef OBS_DATA_PATH
-#define OBS_DATA_PATH "data"
-#endif
-#ifndef OBS_PLUGIN_DESTINATION
-#define OBS_PLUGIN_DESTINATION "obs-plugins"
-#endif
-#ifndef OBS_RELEASE_CANDIDATE
-#define OBS_RELEASE_CANDIDATE 0
-#endif
-#ifndef OBS_BETA
-#define OBS_BETA 0
-#endif
-EOF
+          (
+            echo '#pragma once'
+            echo '#ifndef OBS_INSTALL_PREFIX'
+            echo '#define OBS_INSTALL_PREFIX ""'
+            echo '#endif'
+            echo '#ifndef OBS_DATA_PATH'
+            echo '#define OBS_DATA_PATH "data"'
+            echo '#endif'
+            echo '#ifndef OBS_PLUGIN_DESTINATION'
+            echo '#define OBS_PLUGIN_DESTINATION "obs-plugins"'
+            echo '#endif'
+            echo '#ifndef OBS_RELEASE_CANDIDATE'
+            echo '#define OBS_RELEASE_CANDIDATE 0'
+            echo '#endif'
+            echo '#ifndef OBS_BETA'
+            echo '#define OBS_BETA 0'
+            echo '#endif'
+          ) > include/obs/obsconfig.h
           cp include/obs/obsconfig.h include/obsconfig.h
           
           # Generate MinGW import libraries from 32-bit OBS binaries
@@ -300,29 +300,29 @@ EOF
           }
 
           # Generate obsconfig.h (normally produced by CMake build for OBS 28+)
-          $obsConfigContent = @"
-#pragma once
-#ifndef OBS_INSTALL_PREFIX
-#define OBS_INSTALL_PREFIX ""
-#endif
-#ifndef OBS_DATA_PATH
-#define OBS_DATA_PATH "data"
-#endif
-#ifndef OBS_PLUGIN_PATH
-#define OBS_PLUGIN_PATH "obs-plugins/64bit"
-#endif
-#ifndef OBS_PLUGIN_DESTINATION
-#define OBS_PLUGIN_DESTINATION "obs-plugins/64bit"
-#endif
-#ifndef OBS_RELEASE_CANDIDATE
-#define OBS_RELEASE_CANDIDATE 0
-#endif
-#ifndef OBS_BETA
-#define OBS_BETA 0
-#endif
-"@
-          $obsConfigContent | Out-File -FilePath "obs-sdk\include\obs\obsconfig.h" -Encoding ascii
-          $obsConfigContent | Out-File -FilePath "obs-sdk\include\obsconfig.h" -Encoding ascii
+          $obsConfigLines = @(
+            '#pragma once',
+            '#ifndef OBS_INSTALL_PREFIX',
+            '#define OBS_INSTALL_PREFIX ""',
+            '#endif',
+            '#ifndef OBS_DATA_PATH',
+            '#define OBS_DATA_PATH "data"',
+            '#endif',
+            '#ifndef OBS_PLUGIN_PATH',
+            '#define OBS_PLUGIN_PATH "obs-plugins/64bit"',
+            '#endif',
+            '#ifndef OBS_PLUGIN_DESTINATION',
+            '#define OBS_PLUGIN_DESTINATION "obs-plugins/64bit"',
+            '#endif',
+            '#ifndef OBS_RELEASE_CANDIDATE',
+            '#define OBS_RELEASE_CANDIDATE 0',
+            '#endif',
+            '#ifndef OBS_BETA',
+            '#define OBS_BETA 0',
+            '#endif'
+          )
+          $obsConfigLines | Out-File -FilePath "obs-sdk\include\obs\obsconfig.h" -Encoding ascii
+          $obsConfigLines | Out-File -FilePath "obs-sdk\include\obsconfig.h" -Encoding ascii
 
           # Generate MSVC import library for obs.dll
           "EXPORTS" | Out-File -FilePath "obs.def" -Encoding ascii
