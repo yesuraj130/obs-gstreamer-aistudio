@@ -130,7 +130,6 @@ jobs:
         run: |
           pip install meson ninja
           choco install pkgconfiglite -y
-          "PKG_CONFIG=C:\ProgramData\chocolatey\bin\pkg-config.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Install Qt 6 (MSVC 64-bit)
         uses: jurplel/install-qt-action@v4
@@ -185,6 +184,7 @@ jobs:
           Write-Host "Found GStreamer MSVC SDK at: $gstRoot"
           "GSTREAMER_ROOT=$gstRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$gstRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "PKG_CONFIG=$gstRoot\bin\pkg-config.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Fetch and prepare OBS Studio 30.2.2 (x64) SDK
         shell: pwsh
@@ -249,17 +249,35 @@ jobs:
         shell: pwsh
         run: |
           $gstRoot = if ($env:GSTREAMER_ROOT) { $env:GSTREAMER_ROOT } else { "C:\gstreamer\1.0\msvc_x86_64" }
-          $env:PATH = "$gstRoot\bin;$($env:QTDIR)\bin;C:\ProgramData\chocolatey\bin;$env:PATH"
-          $env:PKG_CONFIG = "C:\ProgramData\chocolatey\bin\pkg-config.exe"
-
+          $gstPkgPath = "$gstRoot\lib\pkgconfig"
           $sdkFullPath = (Get-Item "obs-sdk").FullName
           $sdkPkgPath = (Get-Item "obs-sdk\lib\pkgconfig").FullName
-          $env:PKG_CONFIG_PATH = "$sdkPkgPath;$gstRoot\lib\pkgconfig"
+
+          $sdkPkgFwd = $sdkPkgPath.Replace('\', '/')
+          $gstPkgFwd = $gstPkgPath.Replace('\', '/')
+
+          if (Test-Path "$gstRoot\bin\pkg-config.exe") {
+            $env:PKG_CONFIG = "$gstRoot\bin\pkg-config.exe"
+          } else {
+            $env:PKG_CONFIG = "C:\ProgramData\chocolatey\bin\pkg-config.exe"
+          }
+
+          $env:PATH = "$gstRoot\bin;$($env:QTDIR)\bin;C:\ProgramData\chocolatey\bin;$env:PATH"
+          $env:PKG_CONFIG_PATH = "$sdkPkgPath;$gstPkgPath;$sdkPkgFwd;$gstPkgFwd"
           $env:INCLUDE = "$sdkFullPath\include;$sdkFullPath\include\obs;$env:INCLUDE"
-          $env:LIB = "$sdkFullPath\lib;$env:LIB"
+          $env:LIB = "$sdkFullPath\lib;$gstRoot\lib;$env:LIB"
+
+          Write-Host "Verifying pkg-config resolution..."
+          & $env:PKG_CONFIG --version
+          & $env:PKG_CONFIG --modversion gstreamer-1.0 || Write-Host "gstreamer-1.0 check finished"
 
           $sdkIncludeFwd = $sdkFullPath.Replace('\', '/')
-          meson setup build-win64 --buildtype release -Dwebrtc=disabled -Dc_args="-I$sdkIncludeFwd/include -I$sdkIncludeFwd/include/obs" -Dcpp_args="-I$sdkIncludeFwd/include -I$sdkIncludeFwd/include/obs"
+          meson setup build-win64 `
+            --buildtype release `
+            -Dwebrtc=disabled `
+            -Dpkg_config_path="$sdkPkgFwd,$gstPkgFwd" `
+            -Dc_args="-I$sdkIncludeFwd/include -I$sdkIncludeFwd/include/obs" `
+            -Dcpp_args="-I$sdkIncludeFwd/include -I$sdkIncludeFwd/include/obs"
           ninja -C build-win64
 
       - name: Package OBS 30+ (64-bit Win10/11) Release Archive
