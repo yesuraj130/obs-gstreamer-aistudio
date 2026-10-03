@@ -175,29 +175,32 @@ jobs:
 
           # Generate pkg-config files with forward slashes for Meson
           $sdkPath = (Get-Item "obs-sdk").FullName.Replace("\", "/")
-          @"
-prefix=$sdkPath
-libdir=`${prefix}/lib
-includedir=`${prefix}/include
 
-Name: libobs
-Description: OBS Studio library
-Version: 30.2.2
-Libs: -L`${libdir} -lobs
-Cflags: -I`${includedir} -I`${includedir}/obs
-"@ | Out-File -FilePath "obs-sdk\lib\pkgconfig\libobs.pc" -Encoding ascii
+          $libobsLines = @(
+              "prefix=" + $sdkPath,
+              "libdir=`${prefix}/lib",
+              "includedir=`${prefix}/include",
+              "",
+              "Name: libobs",
+              "Description: OBS Studio library",
+              "Version: 30.2.2",
+              "Libs: -L`${libdir} -lobs",
+              "Cflags: -I`${includedir} -I`${includedir}/obs"
+          )
+          $libobsLines | Out-File -FilePath "obs-sdk\lib\pkgconfig\libobs.pc" -Encoding ascii
 
-          @"
-prefix=$sdkPath
-libdir=`${prefix}/lib
-includedir=`${prefix}/include
-
-Name: obs-frontend-api
-Description: OBS Studio Frontend API library
-Version: 30.2.2
-Libs: -L`${libdir} -lobs-frontend-api
-Cflags: -I`${includedir} -I`${includedir}/obs
-"@ | Out-File -FilePath "obs-sdk\lib\pkgconfig\obs-frontend-api.pc" -Encoding ascii
+          $frontendLines = @(
+              "prefix=" + $sdkPath,
+              "libdir=`${prefix}/lib",
+              "includedir=`${prefix}/include",
+              "",
+              "Name: obs-frontend-api",
+              "Description: OBS Studio Frontend API library",
+              "Version: 30.2.2",
+              "Libs: -L`${libdir} -lobs-frontend-api",
+              "Cflags: -I`${includedir} -I`${includedir}/obs"
+          )
+          $frontendLines | Out-File -FilePath "obs-sdk\lib\pkgconfig\obs-frontend-api.pc" -Encoding ascii
 
       - name: Configure and Compile with Meson and Ninja (MSVC + Qt6 Dock)
         shell: pwsh
