@@ -98,11 +98,11 @@ jobs:
           path: obs-gstreamer-obs27-win32.zip
 
   # =========================================================================
-  # Target 2: Modern OBS Studio 28+/30+/32+ (64-bit x64) for Windows 10/11
+  # Target 2: Modern OBS Studio 30+/32+ (64-bit x64) for Windows 10/11
   # Native MSVC + Qt 6 Build (Enables Native Qt6 Dock in OBS Studio Menu)
   # =========================================================================
   build-win64-obs30:
-    name: "Windows 10/11 / OBS 30+ (64-bit MSVC + Qt6 Dock)"
+    name: "Windows 10/11 / OBS 32+ (64-bit MSVC + Qt6 Dock)"
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -141,13 +141,14 @@ jobs:
       - name: Fetch and install GStreamer MSVC 64-bit SDK
         shell: pwsh
         run: |
-          $gst_base = "https://gstreamer.freedesktop.org/data/pkg/windows/1.22.12/msvc"
-          $runtime_url = "$gst_base/gstreamer-1.0-msvc-x86_64-1.22.12.msi"
-          $devel_url = "$gst_base/gstreamer-1.0-devel-msvc-x86_64-1.22.12.msi"
+          $gst_version = "1.28.7"
+          $gst_base = "https://gstreamer.freedesktop.org/data/pkg/windows/$gst_version/msvc"
+          $runtime_url = "$gst_base/gstreamer-1.0-msvc-x86_64-$gst_version.msi"
+          $devel_url = "$gst_base/gstreamer-1.0-devel-msvc-x86_64-$gst_version.msi"
 
-          Write-Host "Downloading GStreamer MSVC Runtime..."
+          Write-Host "Downloading GStreamer MSVC Runtime ($gst_version)..."
           Invoke-WebRequest -Uri $runtime_url -OutFile "gst-runtime.msi"
-          Write-Host "Downloading GStreamer MSVC Devel SDK..."
+          Write-Host "Downloading GStreamer MSVC Devel SDK ($gst_version)..."
           Invoke-WebRequest -Uri $devel_url -OutFile "gst-devel.msi"
 
           $runtimeMsi = (Get-Item "gst-runtime.msi").FullName
@@ -193,25 +194,26 @@ jobs:
           "$gstRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "PKG_CONFIG=$gstRoot\bin\pkg-config.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Fetch and prepare OBS Studio 30.2.2 (x64) SDK
+      - name: Fetch and prepare OBS Studio 32.2.2 (x64) SDK
         shell: pwsh
         run: |
+          $obs_version = "32.2.2"
           New-Item -ItemType Directory -Force -Path "obs-sdk\include\obs" | Out-Null
           New-Item -ItemType Directory -Force -Path "obs-sdk\lib\pkgconfig" | Out-Null
 
-          Write-Host "Downloading OBS Studio 30.2.2 Windows binary..."
-          Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/releases/download/30.2.2/OBS-Studio-30.2.2-Windows.zip" -OutFile "obs-bin.zip"
+          Write-Host "Downloading OBS Studio $obs_version Windows binary..."
+          Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/releases/download/$obs_version/OBS-Studio-$obs_version-Windows.zip" -OutFile "obs-bin.zip"
           Expand-Archive -Path "obs-bin.zip" -DestinationPath "obs-bin"
 
-          Write-Host "Downloading OBS Studio 30.2.2 source headers..."
-          Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/archive/refs/tags/30.2.2.zip" -OutFile "obs-src.zip"
+          Write-Host "Downloading OBS Studio $obs_version source headers..."
+          Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/archive/refs/tags/$obs_version.zip" -OutFile "obs-src.zip"
           Expand-Archive -Path "obs-src.zip" -DestinationPath "obs-src"
 
           # Provide headers
-          Copy-Item -Recurse -Force "obs-src\obs-studio-30.2.2\libobs\*" "obs-sdk\include\obs\"
-          Copy-Item -Recurse -Force "obs-src\obs-studio-30.2.2\UI\obs-frontend-api\*" "obs-sdk\include\obs\"
-          Copy-Item -Recurse -Force "obs-src\obs-studio-30.2.2\libobs\*" "obs-sdk\include\"
-          Copy-Item -Recurse -Force "obs-src\obs-studio-30.2.2\UI\obs-frontend-api\*" "obs-sdk\include\"
+          Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\libobs\*" "obs-sdk\include\obs\"
+          Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\UI\obs-frontend-api\*" "obs-sdk\include\obs\"
+          Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\libobs\*" "obs-sdk\include\"
+          Copy-Item -Recurse -Force "obs-src\obs-studio-$obs_version\UI\obs-frontend-api\*" "obs-sdk\include\"
 
           # Generate MSVC import library for obs.dll
           "EXPORTS" | Out-File -FilePath "obs.def" -Encoding ascii
@@ -233,7 +235,7 @@ jobs:
               "",
               "Name: libobs",
               "Description: OBS Studio library",
-              "Version: 30.2.2",
+              "Version: $obs_version",
               "Libs: -L`${libdir} -lobs",
               "Cflags: -I`${includedir} -I`${includedir}/obs"
           )
@@ -246,7 +248,7 @@ jobs:
               "",
               "Name: obs-frontend-api",
               "Description: OBS Studio Frontend API library",
-              "Version: 30.2.2",
+              "Version: $obs_version",
               "Libs: -L`${libdir} -lobs-frontend-api",
               "Cflags: -I`${includedir} -I`${includedir}/obs"
           )
