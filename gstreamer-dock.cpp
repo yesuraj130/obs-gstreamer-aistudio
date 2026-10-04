@@ -29,6 +29,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QDockWidget>
+#include <QMainWindow>
+#include <QMenuBar>
 #include <QStandardItemModel>
 
 #include <vector>
@@ -779,9 +781,46 @@ static void edit_master_pipeline(QWidget *parent, gstreamer_dock_state *state)
 	}
 }
 
+static QDockWidget *g_dock_widget = nullptr;
+static const char *DOCK_ID = "obs-gstreamer-dock";
+
+static void add_dock_menu_action(QDockWidget *dock)
+{
+	if (!dock) return;
+	QMainWindow *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	if (!main_win || !main_win->menuBar()) return;
+
+	QAction *toggle_action = dock->toggleViewAction();
+	toggle_action->setText("GStreamer Output");
+
+	// Search for Docks menu in OBS menu bar
+	QMenu *docks_menu = nullptr;
+	for (QAction *menu_action : main_win->menuBar()->actions()) {
+		QMenu *m = menu_action->menu();
+		if (m && (m->title().contains("Dock", Qt::CaseInsensitive) || menu_action->text().contains("Dock", Qt::CaseInsensitive))) {
+			docks_menu = m;
+			break;
+		}
+	}
+	if (docks_menu) {
+		bool exists = false;
+		for (QAction *act : docks_menu->actions()) {
+			if (act == toggle_action || act->text().contains("GStreamer Output")) {
+				exists = true;
+				break;
+			}
+		}
+		if (!exists) {
+			docks_menu->addAction(toggle_action);
+			blog(LOG_INFO, "[obs-gstreamer-dock] Added 'GStreamer Output' toggle to Docks menu");
+		}
+	}
+}
+
 static void dock_frontend_event(enum obs_frontend_event event, void *private_data)
 {
 	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+		add_dock_menu_action(g_dock_widget);
 		auto *st = static_cast<gstreamer_dock_state *>(private_data);
 		if (!st) return;
 		for (int index = 0; index < static_cast<int>(st->configurations.size()); ++index) {
@@ -958,9 +997,6 @@ static QWidget *create_gstreamer_dock_widget(void)
 	return widget;
 }
 
-static QDockWidget *g_dock_widget = nullptr;
-static const char *DOCK_ID = "obs-gstreamer-dock";
-
 extern "C" void gstreamer_dock_register(void)
 {
 	if (!g_dock_widget) {
@@ -969,7 +1005,12 @@ extern "C" void gstreamer_dock_register(void)
 		g_dock_widget = new QDockWidget("GStreamer Output", main_win);
 		g_dock_widget->setObjectName(DOCK_ID);
 		g_dock_widget->setWidget(create_gstreamer_dock_widget());
+#if (defined(LIBOBS_API_MAJOR_VER) && (LIBOBS_API_MAJOR_VER >= 30)) || (defined(LIBOBS_API_VER) && (LIBOBS_API_VER >= 0x1E000000))
+		obs_frontend_add_custom_qdock(DOCK_ID, g_dock_widget);
+#else
 		obs_frontend_add_dock(g_dock_widget);
+#endif
+		add_dock_menu_action(g_dock_widget);
 		blog(LOG_INFO, "[obs-gstreamer-dock] 'GStreamer Output' dock registered successfully");
 	}
 }
