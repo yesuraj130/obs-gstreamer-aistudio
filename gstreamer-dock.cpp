@@ -61,7 +61,7 @@ static const char *DEFAULT_MASTER_PIPELINE =
 static const char *DEFAULT_HUB_RTSP_PIPELINE =
 	"( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true "
 	"caps=\"video/x-h264, stream-format=byte-stream, alignment=au\" ! "
-	"h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 )";
+	"h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 config-interval=1 )";
 
 struct gstreamer_output_config {
 	QString name = "Output";
@@ -74,7 +74,7 @@ struct gstreamer_output_config {
 	QString rtsp_service = "8554";
 	QString rtsp_pipeline = "( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true "
 	                        "caps=\"video/x-h264, stream-format=byte-stream, alignment=au\" ! "
-	                        "h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 )";
+	                        "h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 config-interval=1 )";
 	QString signaling_url = "ws://127.0.0.1:8443";
 	QString webrtc_http_port = "8888";
 	QString webrtc_web_root;

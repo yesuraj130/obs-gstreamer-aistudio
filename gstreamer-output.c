@@ -36,6 +36,9 @@ typedef struct {
 	GstElement *video;
 	GstRTSPServer *server;
 	guint server_source_id;
+	GMainContext *rtsp_context;
+	GMainLoop *rtsp_loop;
+	GThread *rtsp_thread;
 	GstRTSPMountPoints *mounts;
 	GstRTSPMediaFactory *factory;
 	GstRTSPMedia *media;
@@ -176,7 +179,10 @@ static void media_configure_cb(GstRTSPMediaFactory *factory, GstRTSPMedia *media
 	}
 	g_mutex_unlock(&data->lock);
 
-	gst_bus_add_watch(bus, bus_callback, data);
+	GSource *bus_source = gst_bus_create_watch(bus);
+	g_source_set_callback(bus_source, (GSourceFunc)bus_callback, data, NULL);
+	g_source_attach(bus_source, data->rtsp_context ? data->rtsp_context : NULL);
+	g_source_unref(bus_source);
 	gst_object_unref(bus);
 	blog(LOG_INFO, "[obs-gstreamer] RTSP media configured, appsrc ready for scene output");
 
@@ -291,9 +297,27 @@ void gstreamer_output_destroy(void *p)
 		data->media = NULL;
 	}
 
+	if (data->rtsp_loop) {
+		g_main_loop_quit(data->rtsp_loop);
+	}
+	if (data->rtsp_thread) {
+		g_thread_join(data->rtsp_thread);
+		data->rtsp_thread = NULL;
+	}
+	if (data->rtsp_loop) {
+		g_main_loop_unref(data->rtsp_loop);
+		data->rtsp_loop = NULL;
+	}
+
 	if (data->server) {
 		if (data->server_source_id > 0) {
-			g_source_remove(data->server_source_id);
+			if (data->rtsp_context) {
+				GSource *source = g_main_context_find_source_by_id(data->rtsp_context, data->server_source_id);
+				if (source)
+					g_source_destroy(source);
+			} else {
+				g_source_remove(data->server_source_id);
+			}
 			data->server_source_id = 0;
 		}
 		if (data->mounts && data->mount_point) {
@@ -313,6 +337,11 @@ void gstreamer_output_destroy(void *p)
 			gst_object_unref(data->server);
 			data->server = NULL;
 		}
+	}
+
+	if (data->rtsp_context) {
+		g_main_context_unref(data->rtsp_context);
+		data->rtsp_context = NULL;
 	}
 
 	g_free(data->mount_point);
@@ -356,7 +385,7 @@ bool gstreamer_output_start(void *p)
 		const char *mount = obs_data_get_string(data->settings, "rtsp_mount");
 		const char *service = obs_data_get_string(data->settings, "rtsp_service");
 		const char *pipeline = obs_data_get_string(data->settings, "rtsp_pipeline");
-		const char *default_pipe = "( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true block=true ! queue ! video/x-raw, format=%s, width=%d, height=%d, framerate=%d/%d ! videoconvert ! x264enc tune=zerolatency speed-preset=veryfast bitrate=3000 key-int-max=30 ! video/x-h264, stream-format=byte-stream, alignment=au ! h264parse ! rtph264pay name=pay0 pt=96 )";
+		const char *default_pipe = "( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true ! queue max-size-buffers=5 leaky=downstream ! video/x-raw, format=%s, width=%d, height=%d, framerate=%d/%d ! videoconvert ! x264enc tune=zerolatency speed-preset=veryfast bitrate=3000 key-int-max=30 ! video/x-h264, stream-format=byte-stream, alignment=au ! h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 config-interval=1 )";
 		const char *chosen_pipe = (pipeline && pipeline[0]) ? pipeline : default_pipe;
 		char *launch = NULL;
 		if (strstr(chosen_pipe, "%s")) {
@@ -371,20 +400,33 @@ bool gstreamer_output_start(void *p)
 		blog(LOG_INFO, "[obs-gstreamer] RTSP pipeline string: %s", launch);
 
 		data->server = gst_rtsp_server_new();
+		gst_rtsp_server_set_address(data->server, "0.0.0.0");
 		if (service && service[0])
 			gst_rtsp_server_set_service(data->server, service);
 		data->mount_point = g_strdup(mount && mount[0] ? mount : "/live");
 		data->mounts = gst_rtsp_server_get_mount_points(data->server);
 		data->factory = gst_rtsp_media_factory_new();
 		gst_rtsp_media_factory_set_shared(data->factory, TRUE);
+		gst_rtsp_media_factory_set_protocols(data->factory, GST_RTSP_LOWER_TRANS_UDP | GST_RTSP_LOWER_TRANS_UDP_MCAST | GST_RTSP_LOWER_TRANS_TCP);
 		gst_rtsp_media_factory_set_launch(data->factory, launch);
 		g_signal_connect(data->server, "client-connected", G_CALLBACK(client_connected_cb), data);
 		g_signal_connect(data->factory, "media-configure", G_CALLBACK(media_configure_cb), data);
 		gst_rtsp_mount_points_add_factory(data->mounts, data->mount_point, data->factory);
-		data->server_source_id = gst_rtsp_server_attach(data->server, NULL);
+
+		data->rtsp_context = g_main_context_new();
+		data->rtsp_loop = g_main_loop_new(data->rtsp_context, FALSE);
+		data->server_source_id = gst_rtsp_server_attach(data->server, data->rtsp_context);
 		if (data->server_source_id == 0) {
 			blog(LOG_ERROR, "[obs-gstreamer] Failed to attach RTSP server on port %s: address already in use or bind failed", service && service[0] ? service : "8554");
 			obs_output_set_last_error(data->output, "Failed to start RTSP server: port already in use or bind failed");
+			if (data->rtsp_loop) {
+				g_main_loop_unref(data->rtsp_loop);
+				data->rtsp_loop = NULL;
+			}
+			if (data->rtsp_context) {
+				g_main_context_unref(data->rtsp_context);
+				data->rtsp_context = NULL;
+			}
 			if (data->mounts && data->mount_point) {
 				gst_rtsp_mount_points_remove_factory(data->mounts, data->mount_point);
 			}
@@ -407,9 +449,9 @@ bool gstreamer_output_start(void *p)
 			g_free(launch);
 			return false;
 		}
-		gst_rtsp_server_set_service(data->server, service);
+		data->rtsp_thread = g_thread_new("obs_gst_rtsp_loop", (GThreadFunc)g_main_loop_run, data->rtsp_loop);
 		g_free(launch);
-		blog(LOG_INFO, "[obs-gstreamer] RTSP server started at rtsp://127.0.0.1:%s%s", gst_rtsp_server_get_service(data->server), data->mount_point);
+		blog(LOG_INFO, "[obs-gstreamer] RTSP server started at rtsp://0.0.0.0:%s%s", gst_rtsp_server_get_service(data->server), data->mount_point);
 	} else if (data->webrtc_output) {
 		char *error = NULL;
 		blog(LOG_INFO, "[obs-gstreamer] Initializing WebRTC (WHEP) output...");
@@ -507,9 +549,27 @@ void gstreamer_output_stop(void *p, uint64_t ts)
 		data->media = NULL;
 	}
 
+	if (data->rtsp_loop) {
+		g_main_loop_quit(data->rtsp_loop);
+	}
+	if (data->rtsp_thread) {
+		g_thread_join(data->rtsp_thread);
+		data->rtsp_thread = NULL;
+	}
+	if (data->rtsp_loop) {
+		g_main_loop_unref(data->rtsp_loop);
+		data->rtsp_loop = NULL;
+	}
+
 	if (data->server) {
 		if (data->server_source_id > 0) {
-			g_source_remove(data->server_source_id);
+			if (data->rtsp_context) {
+				GSource *source = g_main_context_find_source_by_id(data->rtsp_context, data->server_source_id);
+				if (source)
+					g_source_destroy(source);
+			} else {
+				g_source_remove(data->server_source_id);
+			}
 			data->server_source_id = 0;
 		}
 		if (data->mounts && data->mount_point) {
@@ -532,6 +592,11 @@ void gstreamer_output_stop(void *p, uint64_t ts)
 		g_free(data->mount_point);
 		data->mount_point = NULL;
 		blog(LOG_INFO, "[obs-gstreamer] RTSP server stopped");
+	}
+
+	if (data->rtsp_context) {
+		g_main_context_unref(data->rtsp_context);
+		data->rtsp_context = NULL;
 	}
 
 	if (data->webrtc) {
@@ -600,8 +665,19 @@ void gstreamer_output_raw_video(void *p, struct video_data *frame)
 
 	data->raw_video_frames++;
 
-	// Wrap OBS frame memory directly to avoid a per-frame copy.
-	GstBuffer *buffer = gst_buffer_new_wrapped_full(0, frame->data[0], data->buffer_size, 0, data->buffer_size, NULL, NULL);
+	// Allocate buffer and copy OBS frame data cleanly
+	GstBuffer *buffer = gst_buffer_new_allocate(NULL, data->buffer_size, NULL);
+	if (!buffer) {
+		gst_object_unref(video);
+		return;
+	}
+	gst_buffer_fill(buffer, 0, frame->data[0], data->buffer_size);
+
+	GST_BUFFER_PTS(buffer) = frame->timestamp;
+	GST_BUFFER_DTS(buffer) = frame->timestamp;
+	if (data->ovi.fps_num > 0) {
+		GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale_int(GST_SECOND, data->ovi.fps_den, data->ovi.fps_num);
+	}
 
 	GstFlowReturn result = gst_app_src_push_buffer(GST_APP_SRC(video), buffer);
 	if (data->raw_video_frames == 1) {
@@ -686,7 +762,7 @@ void gstreamer_output_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "rtsp_server", false);
 	obs_data_set_default_string(settings, "rtsp_mount", "/live");
 	obs_data_set_default_string(settings, "rtsp_service", "8554");
-	obs_data_set_default_string(settings, "rtsp_pipeline", "( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true block=true ! queue ! video/x-raw, format=%s, width=%d, height=%d, framerate=%d/%d ! videoconvert ! x264enc tune=zerolatency speed-preset=veryfast bitrate=3000 key-int-max=30 ! video/x-h264, stream-format=byte-stream, alignment=au ! h264parse ! rtph264pay name=pay0 pt=96 )");
+	obs_data_set_default_string(settings, "rtsp_pipeline", "( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true ! queue max-size-buffers=5 leaky=downstream ! video/x-raw, format=%s, width=%d, height=%d, framerate=%d/%d ! videoconvert ! x264enc tune=zerolatency speed-preset=veryfast bitrate=3000 key-int-max=30 ! video/x-h264, stream-format=byte-stream, alignment=au ! h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 config-interval=1 )");
 	obs_data_set_default_bool(settings, "webrtc_output", false);
 	obs_data_set_default_string(settings, "webrtc_http_port", "8888");
 	obs_data_set_default_string(settings, "webrtc_stun_server", "");

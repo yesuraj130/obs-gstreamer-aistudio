@@ -60,6 +60,11 @@ struct gst_master_hub {
 	GThread *worker_thread;
 	bool worker_running;
 
+	// Dedicated GLib RTSP Server Event Loop Thread
+	GMainContext *rtsp_context;
+	GMainLoop *rtsp_loop;
+	GThread *rtsp_thread;
+
 	gint connected_client_count; // Number of active remote RTSP clients across all branches
 	GMutex branch_lock;
 	struct gst_hub_branch *branches;
@@ -442,6 +447,11 @@ static bool hub_init(struct gst_master_hub *hub, const gst_hub_output_params_t *
 	hub->worker_running = true;
 	hub->worker_thread = g_thread_new("gst_hub_worker", hub_worker_loop, hub);
 
+	// Start dedicated GLib RTSP main loop thread
+	hub->rtsp_context = g_main_context_new();
+	hub->rtsp_loop = g_main_loop_new(hub->rtsp_context, FALSE);
+	hub->rtsp_thread = g_thread_new("gst_hub_rtsp_loop", (GThreadFunc)g_main_loop_run, hub->rtsp_loop);
+
 	// Hook into OBS GPU render thread
 	obs_add_main_render_callback(hub_render_callback, hub);
 	hub->render_hook_active = true;
@@ -466,6 +476,22 @@ static void hub_destroy(struct gst_master_hub *hub)
 	if (hub->worker_thread) {
 		g_thread_join(hub->worker_thread);
 		hub->worker_thread = NULL;
+	}
+
+	if (hub->rtsp_loop) {
+		g_main_loop_quit(hub->rtsp_loop);
+	}
+	if (hub->rtsp_thread) {
+		g_thread_join(hub->rtsp_thread);
+		hub->rtsp_thread = NULL;
+	}
+	if (hub->rtsp_loop) {
+		g_main_loop_unref(hub->rtsp_loop);
+		hub->rtsp_loop = NULL;
+	}
+	if (hub->rtsp_context) {
+		g_main_context_unref(hub->rtsp_context);
+		hub->rtsp_context = NULL;
 	}
 
 	if (hub->pipe) {
@@ -554,17 +580,19 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 
 	// Setup GStreamer RTSP Server for this branch
 	branch->server = gst_rtsp_server_new();
+	gst_rtsp_server_set_address(branch->server, "0.0.0.0");
 	gst_rtsp_server_set_service(branch->server, branch->service);
 
 	branch->mounts = gst_rtsp_server_get_mount_points(branch->server);
 	branch->factory = gst_rtsp_media_factory_new();
 	gst_rtsp_media_factory_set_shared(branch->factory, TRUE);
+	gst_rtsp_media_factory_set_protocols(branch->factory, GST_RTSP_LOWER_TRANS_UDP | GST_RTSP_LOWER_TRANS_UDP_MCAST | GST_RTSP_LOWER_TRANS_TCP);
 
 	// The branch pipeline packetizes already-compressed H.264 into RTP (zero encode overhead)
 	const char *default_launch_str =
 		"( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true "
 		"caps=\"video/x-h264, stream-format=byte-stream, alignment=au\" ! "
-		"h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 )";
+		"h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 config-interval=1 )";
 
 	const char *launch_str = (params->rtsp_pipeline && params->rtsp_pipeline[0]) ?
 		params->rtsp_pipeline : default_launch_str;
@@ -573,7 +601,7 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 	g_signal_connect(branch->factory, "media-configure", G_CALLBACK(media_configure_cb), branch);
 	gst_rtsp_mount_points_add_factory(branch->mounts, branch->mount_point, branch->factory);
 
-	branch->source_id = gst_rtsp_server_attach(branch->server, NULL);
+	branch->source_id = gst_rtsp_server_attach(branch->server, g_hub->rtsp_context);
 	if (branch->source_id == 0) {
 		blog(LOG_ERROR, "[obs-gstreamer-hub] Failed to attach RTSP server on port %s: address already in use or bind failed", branch->service);
 		gst_object_unref(branch->server);
@@ -601,7 +629,7 @@ gst_hub_branch_t *gst_render_hub_start_branch(const gst_hub_output_params_t *par
 	g_hub->active_branch_count++;
 	g_mutex_unlock(&g_hub->branch_lock);
 
-	blog(LOG_INFO, "[obs-gstreamer-hub] Branch started: rtsp://127.0.0.1:%s%s", branch->service, branch->mount_point);
+	blog(LOG_INFO, "[obs-gstreamer-hub] Branch started: rtsp://0.0.0.0:%s%s", branch->service, branch->mount_point);
 
 	g_mutex_unlock(&g_hub_mutex);
 	return branch;
@@ -637,7 +665,13 @@ static void gst_render_hub_stop_branch_internal(gst_hub_branch_t *branch)
 		branch->media = NULL;
 	}
 	if (branch->source_id > 0) {
-		g_source_remove(branch->source_id);
+		if (hub && hub->rtsp_context) {
+			GSource *source = g_main_context_find_source_by_id(hub->rtsp_context, branch->source_id);
+			if (source)
+				g_source_destroy(source);
+		} else {
+			g_source_remove(branch->source_id);
+		}
 		branch->source_id = 0;
 	}
 	if (branch->mounts && branch->mount_point) {
