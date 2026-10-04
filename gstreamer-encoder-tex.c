@@ -49,6 +49,25 @@ static const char *gstreamer_tex_encoder_get_name_h264(void *type_data)
 	return "GStreamer Hardware Texture Encoder (H.264 / QSV / VA-API / NVENC)";
 }
 
+static const char *encoder_tex_video_format_to_gst_format(enum video_format format)
+{
+	switch (format) {
+	case VIDEO_FORMAT_I420: return "I420";
+	case VIDEO_FORMAT_NV12: return "NV12";
+	case VIDEO_FORMAT_YVYU: return "YVYU";
+	case VIDEO_FORMAT_YUY2: return "YUY2";
+	case VIDEO_FORMAT_UYVY: return "UYVY";
+	case VIDEO_FORMAT_RGBA: return "RGBA";
+	case VIDEO_FORMAT_BGRA: return "BGRA";
+	case VIDEO_FORMAT_BGRX: return "BGRx";
+	case VIDEO_FORMAT_I444: return "Y444";
+#if defined(VIDEO_FORMAT_P010)
+	case VIDEO_FORMAT_P010: return "P010_10LE";
+#endif
+	default: return "NV12";
+	}
+}
+
 static void gstreamer_tex_encoder_get_video_info(void *data, struct video_scale_info *info)
 {
 	tex_encoder_data_t *enc = (tex_encoder_data_t *)data;
@@ -60,6 +79,18 @@ static void gstreamer_tex_encoder_get_video_info(void *data, struct video_scale_
 		// Bypass OBS GPU conversion to NV12; pass native BGRA texture straight from canvas
 		info->format = VIDEO_FORMAT_BGRA;
 		enc->is_native_bgra = true;
+	} else if (!color_mode || !*color_mode || g_strcmp0(color_mode, "auto") == 0) {
+		// Auto: match OBS canvas video format directly without forcing NV12 conversion
+		struct obs_video_info ovi;
+		if (obs_get_video_info(&ovi) && ovi.output_format != VIDEO_FORMAT_NONE) {
+			info->format = ovi.output_format;
+			enc->is_native_bgra = (ovi.output_format == VIDEO_FORMAT_BGRA ||
+			                       ovi.output_format == VIDEO_FORMAT_BGRX ||
+			                       ovi.output_format == VIDEO_FORMAT_RGBA);
+		} else {
+			info->format = VIDEO_FORMAT_NV12;
+			enc->is_native_bgra = false;
+		}
 	} else {
 		// Default: let OBS perform GPU shader conversion to NV12
 		info->format = VIDEO_FORMAT_NV12;
@@ -82,7 +113,15 @@ static void *gstreamer_tex_encoder_create_internal(obs_data_t *settings, obs_enc
 	data->ovi.output_height = obs_encoder_get_height(encoder);
 
 	const char *color_mode = obs_data_get_string(settings, "color_space_mode");
-	data->is_native_bgra = (g_strcmp0(color_mode, "native_bgra") == 0);
+	if (g_strcmp0(color_mode, "native_bgra") == 0) {
+		data->is_native_bgra = true;
+	} else if (!color_mode || !*color_mode || g_strcmp0(color_mode, "auto") == 0) {
+		data->is_native_bgra = (data->ovi.output_format == VIDEO_FORMAT_BGRA ||
+		                        data->ovi.output_format == VIDEO_FORMAT_BGRX ||
+		                        data->ovi.output_format == VIDEO_FORMAT_RGBA);
+	} else {
+		data->is_native_bgra = false;
+	}
 
 	const char *encoder_type = obs_data_get_string(settings, "encoder_type");
 	int bitrate = (int)obs_data_get_int(settings, "bitrate");
@@ -92,7 +131,7 @@ static void *gstreamer_tex_encoder_create_internal(obs_data_t *settings, obs_enc
 	if (keyint <= 0)
 		keyint = 2;
 
-	const char *gst_format = data->is_native_bgra ? "BGRx" : "NV12";
+	const char *gst_format = data->is_native_bgra ? "BGRx" : encoder_tex_video_format_to_gst_format(data->ovi.output_format);
 	gchar *encoder_elem = NULL;
 
 	if (g_strcmp0(encoder_type, "qsvh265enc") == 0) {
@@ -114,8 +153,41 @@ static void *gstreamer_tex_encoder_create_internal(obs_data_t *settings, obs_enc
 		encoder_elem = g_strdup_printf("nvh264enc bitrate=%d gop-size=%d",
 			bitrate, keyint * data->ovi.fps_num / data->ovi.fps_den);
 	} else {
-		// Default to QSV or VAAPI
-		encoder_elem = g_strdup_printf(is_h265 ? "qsvh265enc bitrate=%d" : "qsvh264enc bitrate=%d", bitrate);
+		// Auto-detect available hardware encoder based on GStreamer registry
+		GstElementFactory *f = NULL;
+		if (is_h265) {
+			if ((f = gst_element_factory_find("vaapih265enc"))) {
+				encoder_elem = g_strdup_printf("vaapih265enc bitrate=%d keyframe-period=%d",
+					bitrate, keyint * data->ovi.fps_num / data->ovi.fps_den);
+				gst_object_unref(f);
+			} else if ((f = gst_element_factory_find("nvh265enc"))) {
+				encoder_elem = g_strdup_printf("nvh265enc bitrate=%d gop-size=%d",
+					bitrate, keyint * data->ovi.fps_num / data->ovi.fps_den);
+				gst_object_unref(f);
+			} else if ((f = gst_element_factory_find("qsvh265enc"))) {
+				encoder_elem = g_strdup_printf("qsvh265enc bitrate=%d gop-size=%d",
+					bitrate, keyint * data->ovi.fps_num / data->ovi.fps_den);
+				gst_object_unref(f);
+			} else {
+				encoder_elem = g_strdup_printf("vaapih265enc bitrate=%d", bitrate);
+			}
+		} else {
+			if ((f = gst_element_factory_find("vaapih264enc"))) {
+				encoder_elem = g_strdup_printf("vaapih264enc bitrate=%d keyframe-period=%d",
+					bitrate, keyint * data->ovi.fps_num / data->ovi.fps_den);
+				gst_object_unref(f);
+			} else if ((f = gst_element_factory_find("nvh264enc"))) {
+				encoder_elem = g_strdup_printf("nvh264enc bitrate=%d gop-size=%d",
+					bitrate, keyint * data->ovi.fps_num / data->ovi.fps_den);
+				gst_object_unref(f);
+			} else if ((f = gst_element_factory_find("qsvh264enc"))) {
+				encoder_elem = g_strdup_printf("qsvh264enc bitrate=%d gop-size=%d",
+					bitrate, keyint * data->ovi.fps_num / data->ovi.fps_den);
+				gst_object_unref(f);
+			} else {
+				encoder_elem = g_strdup_printf("vaapih264enc bitrate=%d", bitrate);
+			}
+		}
 	}
 
 	const char *parser = is_h265 ? "h265parse ! video/x-h265, stream-format=byte-stream, alignment=au"

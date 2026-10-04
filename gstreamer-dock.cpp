@@ -29,6 +29,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QDockWidget>
+#include <QStandardItemModel>
 
 #include <vector>
 
@@ -44,6 +45,10 @@
 #define LIBOBS_API_VER 0
 #endif
 #endif
+
+static const char *RENDER_MODE_CALLBACK = "Render Callback (GPU Texture)";
+static const char *RENDER_MODE_GPU_TEX  = "OBS Encoder (GPU Texture)";
+static const char *RENDER_MODE_CPU_RAM  = "OBS Output (CPU RAM)";
 
 static const char *DEFAULT_MASTER_PIPELINE =
 	"appsrc name=hub_appsrc is-live=true format=GST_FORMAT_TIME do-timestamp=true "
@@ -61,19 +66,22 @@ struct gstreamer_output_config {
 	QString source_type = "Program Output";
 	QString source_name;
 	QString scene_name;
-	QString mode = "Pipeline";
+	QString render_mode = RENDER_MODE_CALLBACK;
+	QString mode = "RTSP";
 	QString rtsp_mount = "/live";
 	QString rtsp_service = "8554";
-	QString rtsp_pipeline = "( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true block=true ! queue ! video/x-raw, format=%s, width=%d, height=%d, framerate=%d/%d ! videoconvert ! x264enc tune=zerolatency speed-preset=veryfast bitrate=3000 key-int-max=30 ! video/x-h264, stream-format=byte-stream, alignment=au ! h264parse ! rtph264pay name=pay0 pt=96 )";
+	QString rtsp_pipeline = "( appsrc name=appsrc_video is-live=true format=GST_FORMAT_TIME do-timestamp=true "
+	                        "caps=\"video/x-h264, stream-format=byte-stream, alignment=au\" ! "
+	                        "h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 )";
 	QString signaling_url = "ws://127.0.0.1:8443";
 	QString webrtc_http_port = "8888";
 	QString webrtc_web_root;
 	QString pipeline = "autovideosink sync=false";
 	bool auto_start = true;
 	bool use_gpu_encoder = false;
-	bool use_render_hub = false;
-	QString gpu_encoder_type = "qsvh265enc";
-	QString color_space_mode = "auto_nv12";
+	bool use_render_hub = true;
+	QString gpu_encoder_type = "auto";
+	QString color_space_mode = "auto";
 	int bitrate_kbps = 4000;
 	obs_output_t *output = nullptr;
 	obs_encoder_t *encoder = nullptr;
@@ -285,6 +293,7 @@ static void save_configurations(const gstreamer_dock_state *state)
 		settings.setValue("source_type", config.source_type);
 		settings.setValue("source_name", config.source_name);
 		settings.setValue("scene_name", config.scene_name);
+		settings.setValue("render_mode", config.render_mode);
 		settings.setValue("mode", config.mode);
 		settings.setValue("rtsp_mount", config.rtsp_mount);
 		settings.setValue("rtsp_service", config.rtsp_service);
@@ -297,7 +306,7 @@ static void save_configurations(const gstreamer_dock_state *state)
 		settings.setValue("use_gpu_encoder", config.use_gpu_encoder);
 		settings.setValue("use_render_hub", config.use_render_hub);
 		settings.setValue("gpu_encoder_type", config.gpu_encoder_type);
-		settings.setValue("color_space_mode", config.color_space_mode);
+		settings.setValue("color_space_mode", "auto");
 		settings.setValue("bitrate_kbps", config.bitrate_kbps);
 		settings.endGroup();
 	}
@@ -328,8 +337,20 @@ static void load_configurations(gstreamer_dock_state *state)
 		config.pipeline = settings.value("pipeline", config.pipeline).toString();
 		config.use_gpu_encoder = settings.value("use_gpu_encoder", config.use_gpu_encoder).toBool();
 		config.use_render_hub = settings.value("use_render_hub", config.use_render_hub).toBool();
-		config.gpu_encoder_type = settings.value("gpu_encoder_type", config.gpu_encoder_type).toString();
-		config.color_space_mode = settings.value("color_space_mode", config.color_space_mode).toString();
+		config.render_mode = settings.value("render_mode").toString();
+		if (config.render_mode.isEmpty()) {
+			if (config.use_render_hub)
+				config.render_mode = RENDER_MODE_CALLBACK;
+			else if (config.use_gpu_encoder)
+				config.render_mode = RENDER_MODE_GPU_TEX;
+			else
+				config.render_mode = RENDER_MODE_CPU_RAM;
+		} else {
+			config.use_render_hub = (config.render_mode == RENDER_MODE_CALLBACK);
+			config.use_gpu_encoder = (config.render_mode == RENDER_MODE_GPU_TEX);
+		}
+		config.gpu_encoder_type = settings.value("gpu_encoder_type", "auto").toString();
+		config.color_space_mode = "auto";
 		config.bitrate_kbps = settings.value("bitrate_kbps", config.bitrate_kbps).toInt();
 		state->configurations.push_back(config);
 		settings.endGroup();
@@ -341,133 +362,155 @@ static bool edit_configuration(QWidget *parent, gstreamer_output_config *config)
 {
 	QDialog dialog(parent);
 	dialog.setWindowTitle("GStreamer Output");
-	dialog.resize(760, 430);
+	dialog.resize(760, 380);
 	QHBoxLayout *columns = new QHBoxLayout(&dialog);
 	QWidget *left_panel = new QWidget(&dialog);
 	QWidget *right_panel = new QWidget(&dialog);
 	QFormLayout *left_form = new QFormLayout(left_panel);
 	QFormLayout *right_form = new QFormLayout(right_panel);
+
 	QLineEdit *name = new QLineEdit(config->name);
+
 	QComboBox *source_type = new QComboBox();
 	source_type->addItems({"Program Output", "Scene", "Source"});
 	source_type->setCurrentText(config->source_type);
+
 	QComboBox *source = new QComboBox();
 	source->addItems(source_names());
 	source->setCurrentText(config->source_name);
+
 	QComboBox *scene = new QComboBox();
 	scene->addItems(scene_names());
 	scene->setCurrentText(config->scene_name);
+
+	QComboBox *render_mode = new QComboBox();
+	render_mode->addItems({RENDER_MODE_CALLBACK, RENDER_MODE_GPU_TEX, RENDER_MODE_CPU_RAM});
+	if (config->render_mode.isEmpty()) {
+		if (config->use_render_hub)
+			render_mode->setCurrentText(RENDER_MODE_CALLBACK);
+		else if (config->use_gpu_encoder)
+			render_mode->setCurrentText(RENDER_MODE_GPU_TEX);
+		else
+			render_mode->setCurrentText(RENDER_MODE_CPU_RAM);
+	} else {
+		render_mode->setCurrentText(config->render_mode);
+	}
+
 	QComboBox *mode = new QComboBox();
 	mode->addItems({"RTSP", "WebRTC", "Pipeline"});
 	mode->setCurrentText(config->mode);
+
 	QLineEdit *mount = new QLineEdit(config->rtsp_mount);
 	QLineEdit *service = new QLineEdit(config->rtsp_service);
+
 	QPlainTextEdit *rtsp_pipeline = new QPlainTextEdit(config->rtsp_pipeline);
 	rtsp_pipeline->setMinimumHeight(100);
-	QLineEdit *signaling = new QLineEdit(config->signaling_url);
-	QCheckBox *auto_start = new QCheckBox("Start output automatically when OBS launches");
-	auto_start->setChecked(config->auto_start);
+	rtsp_pipeline->setMinimumWidth(430);
+
 	QLineEdit *http_port = new QLineEdit(config->webrtc_http_port);
 	QLineEdit *web_root = new QLineEdit(config->webrtc_web_root);
 	web_root->setPlaceholderText("~/.local/share/obs-gstreamer/webrtc");
+
+	QCheckBox *auto_start = new QCheckBox("Start output automatically when OBS launches");
+	auto_start->setChecked(config->auto_start);
+
 	QLineEdit *pipeline = new QLineEdit(config->pipeline);
-	QCheckBox *use_gpu_encoder = new QCheckBox("Zero-Copy GPU Texture Encoder");
-	use_gpu_encoder->setChecked(config->use_gpu_encoder);
-	QCheckBox *use_render_hub = new QCheckBox("Direct GPU Render Hub (ASAP Mode)");
-	use_render_hub->setToolTip("Bypasses OBS output queues and encodes directly from GPU off-screen view with multi-port RTSP branching");
-	use_render_hub->setChecked(config->use_render_hub);
-	QComboBox *gpu_encoder_type = new QComboBox();
-	gpu_encoder_type->addItem("Intel QSV H.265 (qsvh265enc)", "qsvh265enc");
-	gpu_encoder_type->addItem("Intel QSV H.264 (qsvh264enc)", "qsvh264enc");
-	gpu_encoder_type->addItem("Linux VA-API H.265 (vaapih265enc)", "vaapih265enc");
-	gpu_encoder_type->addItem("Linux VA-API H.264 (vaapih264enc)", "vaapih264enc");
-	gpu_encoder_type->addItem("NVIDIA NVENC H.265 (nvh265enc)", "nvh265enc");
-	gpu_encoder_type->addItem("NVIDIA NVENC H.264 (nvh264enc)", "nvh264enc");
-	int enc_idx = gpu_encoder_type->findData(config->gpu_encoder_type);
-	if (enc_idx >= 0) gpu_encoder_type->setCurrentIndex(enc_idx);
 
-	QComboBox *color_space_mode = new QComboBox();
-	color_space_mode->addItem("Auto NV12 (Fast OBS GPU Shader)", "auto_nv12");
-	color_space_mode->addItem("Native BGRA (Skip GPU Conversion)", "native_bgra");
-	int cs_idx = color_space_mode->findData(config->color_space_mode);
-	if (cs_idx >= 0) color_space_mode->setCurrentIndex(cs_idx);
-
-	rtsp_pipeline->setMinimumWidth(430);
 	left_form->addRow("Name", name);
 	left_form->addRow("Source type", source_type);
 	left_form->addRow("Source", source);
 	left_form->addRow("Scene", scene);
+	left_form->addRow("Render mode", render_mode);
 	left_form->addRow("Output mode", mode);
 	left_form->addRow("RTSP mount", mount);
 	left_form->addRow("RTSP service", service);
-	left_form->addRow("Direct Render Hub", use_render_hub);
-	left_form->addRow("Hardware Encode", use_gpu_encoder);
-	left_form->addRow("HW Encoder", gpu_encoder_type);
-	left_form->addRow("Color Conversion", color_space_mode);
+	left_form->addRow("Auto-start", auto_start);
+
 	right_form->addRow("RTSP pipeline", rtsp_pipeline);
 	right_form->addRow("WebRTC HTTP port", http_port);
 	right_form->addRow("WebRTC web root", web_root);
-	right_form->addRow("WebRTC auto-start", auto_start);
 	right_form->addRow("Pipeline", pipeline);
+
 	QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
 	right_form->addRow(buttons);
+
 	columns->addWidget(left_panel, 1);
 	columns->addWidget(right_panel, 2);
-	auto update_enabled = [source_type, source, scene, mode, mount, service, rtsp_pipeline, signaling, http_port, web_root, auto_start, pipeline, use_gpu_encoder, use_render_hub, gpu_encoder_type, color_space_mode]() {
-		source->setEnabled(source_type->currentText() == "Source");
-		scene->setEnabled(source_type->currentText() == "Scene");
-		const bool is_hub = use_render_hub->isChecked();
-		if (is_hub) {
+
+	auto update_visibility = [&dialog, left_form, right_form, source_type, source, scene, render_mode, mode, mount, service, rtsp_pipeline, http_port, web_root, pipeline]() {
+		const QString cur_source_type = source_type->currentText();
+		left_form->setRowVisible(source, cur_source_type == "Source");
+		left_form->setRowVisible(scene, cur_source_type == "Scene");
+
+		const QString cur_render_mode = render_mode->currentText();
+		const bool is_callback = (cur_render_mode == RENDER_MODE_CALLBACK);
+
+		// If Render Callback is active, WebRTC is not supported on direct GPU hub branches.
+		// If WebRTC is currently selected, switch to RTSP.
+		if (is_callback && mode->currentText() == "WebRTC") {
 			mode->setCurrentText("RTSP");
-			mode->setEnabled(false);
-			mount->setEnabled(true);
-			service->setEnabled(true);
-			rtsp_pipeline->setEnabled(true);
-		} else {
-			mode->setEnabled(true);
-			mount->setEnabled(mode->currentText() == "RTSP");
-			service->setEnabled(mode->currentText() == "RTSP");
-			rtsp_pipeline->setEnabled(mode->currentText() == "RTSP");
 		}
-		signaling->setEnabled(false);
-		http_port->setEnabled(!is_hub && mode->currentText() == "WebRTC");
-		web_root->setEnabled(!is_hub && mode->currentText() == "WebRTC");
-		auto_start->setEnabled(true);
-		pipeline->setEnabled(!is_hub && mode->currentText() == "Pipeline");
-		gpu_encoder_type->setEnabled(is_hub || use_gpu_encoder->isChecked());
-		color_space_mode->setEnabled(!is_hub && use_gpu_encoder->isChecked());
+		QStandardItemModel *mode_model = qobject_cast<QStandardItemModel *>(mode->model());
+		if (mode_model) {
+			for (int i = 0; i < mode_model->rowCount(); ++i) {
+				QStandardItem *item = mode_model->item(i);
+				if (item && item->text() == "WebRTC") {
+					item->setEnabled(!is_callback);
+					item->setSelectable(!is_callback);
+				}
+			}
+		}
+
+		const QString cur_mode = mode->currentText();
+		const bool is_rtsp = (cur_mode == "RTSP");
+		const bool is_webrtc = (cur_mode == "WebRTC");
+		const bool is_pipe = (cur_mode == "Pipeline");
+
+		left_form->setRowVisible(mount, is_rtsp);
+		left_form->setRowVisible(service, is_rtsp);
+		right_form->setRowVisible(rtsp_pipeline, is_rtsp);
+
+		right_form->setRowVisible(http_port, is_webrtc);
+		right_form->setRowVisible(web_root, is_webrtc);
+
+		right_form->setRowVisible(pipeline, is_pipe);
+
+		dialog.adjustSize();
 	};
-	QObject::connect(source_type, &QComboBox::currentTextChanged, update_enabled);
-	QObject::connect(mode, &QComboBox::currentTextChanged, update_enabled);
-	QObject::connect(use_gpu_encoder, &QCheckBox::toggled, update_enabled);
-	QObject::connect(use_render_hub, &QCheckBox::toggled, update_enabled);
-	QObject::connect(use_render_hub, &QCheckBox::toggled, [rtsp_pipeline](bool checked) {
-		if (checked && (rtsp_pipeline->toPlainText().trimmed().isEmpty() || rtsp_pipeline->toPlainText().contains("x264enc"))) {
+
+	QObject::connect(source_type, &QComboBox::currentTextChanged, update_visibility);
+	QObject::connect(render_mode, &QComboBox::currentTextChanged, update_visibility);
+	QObject::connect(render_mode, &QComboBox::currentTextChanged, [rtsp_pipeline](const QString &cur_rm) {
+		if (cur_rm == RENDER_MODE_CALLBACK &&
+		    (rtsp_pipeline->toPlainText().trimmed().isEmpty() || rtsp_pipeline->toPlainText().contains("x264enc"))) {
 			rtsp_pipeline->setPlainText(DEFAULT_HUB_RTSP_PIPELINE);
 		}
 	});
+	QObject::connect(mode, &QComboBox::currentTextChanged, update_visibility);
 	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-	update_enabled();
+
+	update_visibility();
+
 	if (dialog.exec() != QDialog::Accepted)
 		return false;
+
 	config->name = name->text().trimmed();
 	config->source_type = source_type->currentText();
 	config->source_name = source->currentText();
 	config->scene_name = scene->currentText();
+	config->render_mode = render_mode->currentText();
+	config->use_render_hub = (config->render_mode == RENDER_MODE_CALLBACK);
+	config->use_gpu_encoder = (config->render_mode == RENDER_MODE_GPU_TEX);
 	config->mode = mode->currentText();
 	config->rtsp_mount = mount->text();
 	config->rtsp_service = service->text();
 	config->rtsp_pipeline = rtsp_pipeline->toPlainText();
-	config->signaling_url = signaling->text();
 	config->webrtc_http_port = http_port->text();
 	config->webrtc_web_root = web_root->text();
 	config->auto_start = auto_start->isChecked();
 	config->pipeline = pipeline->text();
-	config->use_gpu_encoder = use_gpu_encoder->isChecked();
-	config->use_render_hub = use_render_hub->isChecked();
-	config->gpu_encoder_type = gpu_encoder_type->currentData().toString();
-	config->color_space_mode = color_space_mode->currentData().toString();
+	config->color_space_mode = "auto";
 	if (config->name.isEmpty())
 		config->name = "Output";
 	return true;
@@ -491,12 +534,12 @@ static void refresh_rows(gstreamer_dock_state *state)
 		row_layout->setContentsMargins(8, 2, 8, 2);
 		row_layout->setSpacing(6);
 		QString label_text;
-		if (config.use_render_hub) {
-			label_text = QString("%1 [Direct GPU Hub: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status);
-		} else if (config.use_gpu_encoder) {
-			label_text = QString("%1 [GPU: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status);
+		if (config.render_mode == RENDER_MODE_CALLBACK || config.use_render_hub) {
+			label_text = QString("%1 [Render Callback: %2]  [%3]").arg(config.name, config.mode, status);
+		} else if (config.render_mode == RENDER_MODE_GPU_TEX || config.use_gpu_encoder) {
+			label_text = QString("%1 [GPU Texture: %2]  [%3]").arg(config.name, config.mode, status);
 		} else {
-			label_text = QString("%1  [%2]").arg(config.name, status);
+			label_text = QString("%1 [CPU RAM: %2]  [%3]").arg(config.name, config.mode, status);
 		}
 		QLabel *label = new QLabel(label_text);
 		QPushButton *start = new QPushButton("Start");
@@ -548,12 +591,12 @@ static void update_row_states(gstreamer_dock_state *state)
 		auto buttons = row_widget->findChildren<QPushButton *>();
 
 		QString label_text;
-		if (config.use_render_hub) {
-			label_text = QString("%1 [Direct GPU Hub: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status);
-		} else if (config.use_gpu_encoder) {
-			label_text = QString("%1 [GPU: %2]  [%3]").arg(config.name, config.gpu_encoder_type, status);
+		if (config.render_mode == RENDER_MODE_CALLBACK || config.use_render_hub) {
+			label_text = QString("%1 [Render Callback: %2]  [%3]").arg(config.name, config.mode, status);
+		} else if (config.render_mode == RENDER_MODE_GPU_TEX || config.use_gpu_encoder) {
+			label_text = QString("%1 [GPU Texture: %2]  [%3]").arg(config.name, config.mode, status);
 		} else {
-			label_text = QString("%1  [%2]").arg(config.name, status);
+			label_text = QString("%1 [CPU RAM: %2]  [%3]").arg(config.name, config.mode, status);
 		}
 
 		if (label && label->text() != label_text) {
@@ -922,14 +965,11 @@ extern "C" void gstreamer_dock_register(void)
 {
 	if (!g_dock_widget) {
 		blog(LOG_INFO, "[obs-gstreamer-dock] Registering 'GStreamer Output' dock widget with OBS frontend");
-		g_dock_widget = new QDockWidget("GStreamer Output");
+		QWidget *main_win = (QWidget *)obs_frontend_get_main_window();
+		g_dock_widget = new QDockWidget("GStreamer Output", main_win);
 		g_dock_widget->setObjectName(DOCK_ID);
 		g_dock_widget->setWidget(create_gstreamer_dock_widget());
-#if (defined(LIBOBS_API_MAJOR_VER) && (LIBOBS_API_MAJOR_VER >= 30)) || (defined(LIBOBS_API_VER) && (LIBOBS_API_VER >= 0x1E000000))
-		obs_frontend_add_custom_qdock(DOCK_ID, g_dock_widget);
-#else
 		obs_frontend_add_dock(g_dock_widget);
-#endif
 		blog(LOG_INFO, "[obs-gstreamer-dock] 'GStreamer Output' dock registered successfully");
 	}
 }
